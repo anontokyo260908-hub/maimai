@@ -53,6 +53,16 @@ function draw() {
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
 }
+
+/**
+ * 75% 不透明的黄色（alpha 191），用于 hold 连接条与 star 箭头轨道。
+ * 返回 p5 颜色对象，直接传给 stroke()/fill() 使用。
+ */
+function yellow75() {
+  const c = color(HOLD_COLOR); // 黄 #ffd54a
+  c.setAlpha(191);             // 191 ≈ 75%
+  return c;
+}
 // ---------------------------------------------------------------------------
 // 绘制：中心圆盘
 // ---------------------------------------------------------------------------
@@ -190,8 +200,8 @@ function drawNotes() {
 }
 
 /**
- * hold 音符：沿径向的胶囊条，头部在外（progress * judgeRadius），尾部在内。
- * 用圆头粗线（strokeCap ROUND）实现胶囊形状。
+ * hold 音符：两端中空圆环（与 tap 同尺寸）+ 中间 75% 半透明黄色连接条。
+ * 先画半透明连接条，再画两端不透明圆环 → 两端实色、中间半透明。
  */
 function drawHoldNote(n) {
   const ang = n.angle * TWO_PI / 8 - PI / 2;
@@ -206,30 +216,40 @@ function drawHoldNote(n) {
   const tailY = height / 2 + sin(ang) * tailR;
 
   push();
-  stroke(HOLD_COLOR); // 黄 #ffd54a
-  strokeWeight(26);
-  strokeCap(ROUND); // 圆头线帽 → 两端为圆形，整体是胶囊
+
+  // 1) 中间连接：75% 黄色粗条连接两个圆心
+  strokeCap(ROUND);
+  stroke(yellow75()); // 黄 75%（alpha 191）
+  strokeWeight(24);
   line(tailX, tailY, headX, headY);
+
+  // 2) 两端：不透明黄色中空圆环（直径 34px、线宽 6px，与 tap 同尺寸）
+  noFill();
+  stroke(HOLD_COLOR); // 黄 #ffd54a
+  strokeWeight(6);
+  circle(headX, headY, 34);
+  circle(tailX, tailY, 34);
+
   pop();
 }
 
 /**
- * star 音符：先画判定圈上的箭头轨道（指出滑动方向），再画星星本体。
+ * star 音符：先画判定圈上的箭头轨道（指出滑动方向），再画圆润大星本体。
  */
 function drawStarNote(n) {
   const startAngle = n.startAngle;
   const direction = n.direction;
-  const endAngle = startAngle + direction; // 相邻判定点
 
-  // ---- 箭头轨道：startAngle → endAngle 之间等距 5 个 chevron ----
+  // ---- 箭头轨道：startAngle → endAngle 之间等距 5 个圆角 chevron ----
   push();
   noFill();
-  stroke(255, 255, 255, 180);
-  strokeWeight(3);
   strokeCap(ROUND);
   strokeJoin(ROUND);
+  stroke(yellow75()); // 黄 75%（alpha 191）
+  strokeWeight(6);
 
   const arrows = 5;
+  const armLen = 16; // 两条短线各约 16px
   for (let k = 0; k < arrows; k++) {
     const t = (k + 0.5) / arrows;
     const angIndex = startAngle + direction * t;
@@ -242,13 +262,14 @@ function drawStarNote(n) {
     const tx = cos(tangent);
     const ty = sin(tangent);
 
-    // chevron「>」：两条短线从前端向后张开
-    const size = 7;
-    const backX = x - tx * size;
-    const backY = y - ty * size;
+    // 「>」chevron：从尖端向后张开的两条短线
+    const backX = x - tx * armLen;
+    const backY = y - ty * armLen;
+    const wingX = -ty * armLen * 0.75;
+    const wingY = tx * armLen * 0.75;
 
-    line(x, y, backX + ty * size * 0.7, backY - tx * size * 0.7);
-    line(x, y, backX - ty * size * 0.7, backY + tx * size * 0.7);
+    line(x, y, backX + wingX, backY + wingY);
+    line(x, y, backX - wingX, backY - wingY);
   }
   pop();
 
@@ -258,40 +279,30 @@ function drawStarNote(n) {
   const x = width / 2 + cos(angRad) * judgeRadius;
   const y = height / 2 + sin(angRad) * judgeRadius;
 
-  drawStar(x, y, 22, 9);
+  drawStar(x, y, 26, 11);
 }
 
 /**
- * 在 (cx, cy) 处画一个圆润五角星。
- * outerR：外接半径，innerR：内接半径。
- * 用 curveVertex 让星角更圆润。
+ * 在 (cx, cy) 处画一个圆角大五角星（外接半径 outerR、内接半径 innerR）。
+ * 用 10 个顶点组成星形，再用同色粗描边（strokeJoin ROUND）把尖角磨圆。
  */
 function drawStar(cx, cy, outerR, innerR) {
-  const pts = [];
+  push();
+  translate(cx, cy);
+
+  fill(STAR_COLOR);           // 黄 #ffd54a
+  stroke(STAR_COLOR);         // 描边与填充同色 → 尖角变圆润
+  strokeWeight(8);
+  strokeJoin(ROUND);
+  strokeCap(ROUND);
+
+  beginShape();
   for (let i = 0; i < 10; i++) {
     const r = i % 2 === 0 ? outerR : innerR;
     // -PI/2 让第一个尖角朝正上方
     const a = i * PI / 5 - PI / 2;
-    pts.push([cos(a) * r, sin(a) * r]);
+    vertex(cos(a) * r, sin(a) * r);
   }
-
-  push();
-  translate(cx, cy);
-
-  // 白色半透明描边
-  stroke(255, 255, 255, 170);
-  strokeWeight(2);
-  strokeCap(ROUND);
-  strokeJoin(ROUND);
-  fill(STAR_COLOR); // 黄 #ffd54a
-
-  beginShape();
-  // curveVertex 需要首尾各重复一次来控制闭合处的曲率
-  curveVertex(pts[pts.length - 2][0], pts[pts.length - 2][1]);
-  curveVertex(pts[pts.length - 1][0], pts[pts.length - 1][1]);
-  for (const p of pts) curveVertex(p[0], p[1]);
-  curveVertex(pts[0][0], pts[0][1]);
-  curveVertex(pts[1][0], pts[1][1]);
   endShape(CLOSE);
 
   pop();
