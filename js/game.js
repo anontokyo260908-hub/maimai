@@ -12,6 +12,17 @@ const HOLD_COLOR = '#ffd54a';  // 黄：长按音符（--hold）
 const STAR_COLOR = '#ffd54a';  // 黄：星星滑动音符（与 hold 同色，靠形状区分）
 
 // ---------------------------------------------------------------------------
+// 判定常量
+// ---------------------------------------------------------------------------
+const JUDGE_WINDOWS = { perfect: 60, great: 120, good: 180 }; // 判定时间窗(ms)
+const JUDGE_COLORS = {
+  perfect: '#ff3b6b', // 红
+  great: '#ffd54a',   // 黄
+  good: '#3ddc84',    // 绿
+  miss: '#4a90e2',    // 蓝
+};
+
+// ---------------------------------------------------------------------------
 // 全局状态
 // ---------------------------------------------------------------------------
 let gameStarted = false;
@@ -23,6 +34,10 @@ const STAR_TRAVEL_TIME = 1500;      // star 从一个判定点滑到相邻判定
 const HOLD_LENGTH = 90;             // 长按胶囊长度（像素；后续可改成按住时长换算）
 let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 millis()）
 
+let judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 }; // 各判定计数
+let effects = [];                   // 打击特效 {x, y, color, start}
+let judgeOsc, judgeEnv;             // 判定音效（振荡器 + 包络）
+
 // ---------------------------------------------------------------------------
 // 尺寸常量（每帧根据画布尺寸重新计算）
 // ---------------------------------------------------------------------------
@@ -33,6 +48,7 @@ let judgeRadius;  // 判定圈半径 = min(width, height) * 0.45（8 个点所�
 // ---------------------------------------------------------------------------
 function setup() {
   createCanvas(windowWidth, windowHeight).parent('game');
+  initSounds();
 }
 
 function draw() {
@@ -42,11 +58,12 @@ function draw() {
 
   if (!gameStarted) return; // 未开始时只留背景
 
-  drawDisc();
+    drawDisc();
   drawJudgePoints();
 
   updateNotes();
   drawNotes();
+  drawEffects();
 }
 
 /** 窗口缩放：让画布跟随视口尺寸 */
@@ -117,21 +134,34 @@ function drawJudgePoints() {
  */
 function spawnNote() {
   const type = random(['tap', 'tap', 'tap', 'hold', 'star']);
+  const spawnTime = millis();
 
   if (type === 'star') {
+    const startAngle = floor(random(8));       // 起始判定点 0~7
+    const direction = random() < 0.5 ? 1 : -1; // 1 顺时针，-1 逆时针
+
     notes.push({
       type: 'star',
-      startAngle: floor(random(8)),          // 起始判定点 0~7
-      direction: random() < 0.5 ? 1 : -1,    // 1 顺时针，-1 逆时针
-      spawnTime: millis(),
+      startAngle: startAngle,
+      direction: direction,
+      spawnTime: spawnTime,
       progress: 0,
+      // 目标判定点（滑动到达的那个点）
+      targetAngle: (startAngle + direction + 8) % 8,
+      hitTime: spawnTime + STAR_TRAVEL_TIME,
+      judged: false,
     });
   } else {
+    const angle = floor(random(8)); // 0~7，8 个方向之一
+
     notes.push({
-      type: type,                            // 'tap' | 'hold'
-      angle: floor(random(8)),               // 0~7，8 个方向之一
-      spawnTime: millis(),
+      type: type, // 'tap' | 'hold'
+      angle: angle,
+      targetAngle: angle,
+      spawnTime: spawnTime,
       progress: 0,
+      hitTime: spawnTime + NOTE_TRAVEL_TIME,
+      judged: false,
     });
   }
 }
@@ -149,11 +179,21 @@ function updateNotes() {
     nextSpawnTime += 60000 / BPM;
   }
 
-  // 更新 / 移除：倒序便于 splice
+    // 更新 / 移除：倒序便于 splice
   for (let i = notes.length - 1; i >= 0; i--) {
     const n = notes[i];
     const travel = n.type === 'star' ? STAR_TRAVEL_TIME : NOTE_TRAVEL_TIME;
     const progress = (now - n.spawnTime) / travel;
+
+    // 自动 miss：超过 good 判定窗仍未判定
+    if (!n.judged && now > n.hitTime + JUDGE_WINDOWS.good) {
+      judgeCounts.miss++;
+      updateJudgeHud();
+      playJudgeSound('miss');
+      spawnEffect(n, 'miss');
+      notes.splice(i, 1);
+      continue;
+    }
 
     if (progress >= 1) {
       // 已到达终点，先移除
@@ -309,13 +349,177 @@ function drawStar(cx, cy, outerR, innerR) {
 }
 
 // ---------------------------------------------------------------------------
+// 判定系统：键盘输入（临时） / 判定核心 / 成绩更新 / 音效 / 特效
+// ---------------------------------------------------------------------------
+
+/**
+ * 音效初始化：正弦振荡器 + 短促包络，只在 setup() 里调用一次。
+ */
+function initSounds() {
+  judgeOsc = new p5.Oscillator('sine');
+  judgeOsc.start();
+  judgeOsc.amp(0);
+
+  judgeEnv = new p5.Envelope();
+  judgeEnv.setADSR(0.001, 0.12, 0, 0.05);
+  judgeEnv.setRange(0.4, 0);
+}
+
+/**
+ * 按判定类型播放提示音：越好的判定音高越高。
+ */
+function playJudgeSound(type) {
+  if (!judgeOsc || !judgeEnv) return; // 音效未初始化或未解锁时静默跳过
+
+  const freq = { perfect: 880, great: 660, good: 440, miss: 220 }[type];
+  judgeOsc.freq(freq);
+  judgeEnv.play(judgeOsc);
+}
+
+/**
+ * 键盘输入（临时方案）：按 1~8 键模拟 8 个判定点。
+ * 注意：模块 8 会用手势识别替换这里的输入入口（直接调用 hitJudge(angleIndex)）。
+ */
+function keyPressed() {
+  if (!gameStarted) return;
+
+  if (key >= '1' && key <= '8') {
+    const angleIndex = int(key) - 1; // '1' → 0 … '8' → 7
+    hitJudge(angleIndex);
+  }
+}
+
+/**
+ * 判定核心：在指定角度索引上寻找最接近判定时刻的未判定音符。
+ * 没找到（空打）则什么都不做，不产生 miss。
+ */
+function hitJudge(angleIndex) {
+  const now = millis();
+  let best = null;
+  let bestDiff = Infinity;
+
+  for (const n of notes) {
+    if (n.judged) continue;
+    if (n.targetAngle !== angleIndex) continue;
+
+    const diff = abs(now - n.hitTime);
+    if (diff > JUDGE_WINDOWS.good) continue;
+
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = n;
+    }
+  }
+
+  if (!best) return; // 空打不判
+
+  let type;
+  if (bestDiff <= JUDGE_WINDOWS.perfect) type = 'perfect';
+  else if (bestDiff <= JUDGE_WINDOWS.great) type = 'great';
+  else type = 'good';
+
+  applyJudge(best, type);
+}
+
+/**
+ * 应用判定结果：标记已判定、累加计数、更新 HUD、播放音效、生成特效、移除音符。
+ */
+function applyJudge(note, type) {
+  note.judged = true;
+  judgeCounts[type]++;
+  updateJudgeHud();
+  playJudgeSound(type);
+  spawnEffect(note, type);
+
+  const idx = notes.indexOf(note);
+  if (idx !== -1) notes.splice(idx, 1);
+}
+
+/**
+ * 把 judgeCounts 同步到顶部 HUD 的四个计数 span。
+ */
+function updateJudgeHud() {
+  const map = {
+    'judge-perfect': judgeCounts.perfect,
+    'judge-great': judgeCounts.great,
+    'judge-good': judgeCounts.good,
+    'judge-miss': judgeCounts.miss,
+  };
+  for (const id in map) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = map[id];
+  }
+}
+
+/**
+ * 计算音符目标判定点的坐标（判定圈上的对应角度）。
+ */
+function noteTargetPosition(note) {
+  const ang = note.targetAngle * TWO_PI / 8 - PI / 2;
+  return {
+    x: width / 2 + cos(ang) * judgeRadius,
+    y: height / 2 + sin(ang) * judgeRadius,
+  };
+}
+
+/**
+ * 在音符目标位置生成一次打击特效。
+ */
+function spawnEffect(note, type) {
+  const pos = noteTargetPosition(note);
+  effects.push({
+    x: pos.x,
+    y: pos.y,
+    color: JUDGE_COLORS[type],
+    start: millis(),
+  });
+}
+
+/**
+ * 绘制打击特效：300ms 内向外扩散并淡出的空心圆。
+ */
+function drawEffects() {
+  const now = millis();
+  const LIFE = 300;
+
+  push();
+  noFill();
+  strokeWeight(3);
+
+  for (let i = effects.length - 1; i >= 0; i--) {
+    const e = effects[i];
+    const p = (now - e.start) / LIFE;
+
+    if (p >= 1) {
+      effects.splice(i, 1);
+      continue;
+    }
+
+    const r = map(p, 0, 1, 10, 50);
+    const c = color(e.color);
+    c.setAlpha(255 * (1 - p)); // 逐渐淡出
+    stroke(c);
+    circle(e.x, e.y, r * 2);
+  }
+
+  pop();
+}
+
+// ---------------------------------------------------------------------------
 // 游戏初始化入口（由 main.js 在点击「开始游戏」时调用）
 // ---------------------------------------------------------------------------
 function startGame() {
   gameStarted = true;
 
-  // 重置音符状态，保证每局从头开始
+  // 解锁浏览器音频（必须由用户手势触发）
+  if (typeof userStartAudio === 'function') userStartAudio();
+  initSounds();
+
+  // 重置音符与判定状态，保证每局从头开始
   notes = [];
+  effects = [];
+  judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 };
+  updateJudgeHud();
   nextSpawnTime = millis();
 }
 
