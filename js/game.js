@@ -50,6 +50,66 @@ let gameEnded = false;              // 是否已结算（避免重复触发 endG
 const SCORE_TABLE = { perfect: 1000, great: 500, good: 100 }; // 计分规则（miss 不加分）
 
 // ---------------------------------------------------------------------------
+// 手势引擎（MediaPipe Pose Landmarker）
+// ---------------------------------------------------------------------------
+const MP_VERSION = "0.10.21";
+const MP_URLS = [
+  `https://registry.npmmirror.com/@mediapipe/tasks-vision/${MP_VERSION}/files`,
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`,
+];
+const MODEL_URLS = [
+  "pose_landmarker_lite.task",
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+];
+const BODY = {
+  L_SHOULDER: 11, R_SHOULDER: 12,
+  L_ELBOW: 13, R_ELBOW: 14,
+  L_WRIST: 15, R_WRIST: 16,
+  L_PINKY: 17, L_INDEX: 18, L_THUMB: 19,
+  R_PINKY: 20, R_INDEX: 21, R_THUMB: 22,
+};
+let video, poseLandmarker = null, poses = [], lastVideoTime = -1;
+async function loadPoseLandmarker() {
+  for (const base of MP_URLS) {
+    let vision, fileset;
+    try {
+      vision = await import(`${base}/vision_bundle.mjs`);
+      fileset = await vision.FilesetResolver.forVisionTasks(`${base}/wasm`);
+    } catch (e) { continue; }
+    for (const model of MODEL_URLS) {
+      for (const delegate of ["GPU", "CPU"]) {
+        try {
+          poseLandmarker = await vision.PoseLandmarker.createFromOptions(fileset, {
+            baseOptions: { modelAssetPath: model, delegate },
+            runningMode: "VIDEO",
+            numPoses: 1,
+          });
+          return;
+        } catch (e) {}
+      }
+    }
+  }
+}
+function updatePoses() {
+  if (!poseLandmarker || !video) return;
+  if (video.elt.readyState < 2) return;
+  if (video.elt.currentTime === lastVideoTime) return;
+  lastVideoTime = video.elt.currentTime;
+  const result = poseLandmarker.detectForVideo(video.elt, performance.now());
+  poses = result.landmarks.map((pts) =>
+    pts.map((p) => ({ x: (1 - p.x) * width, y: p.y * height,
+      visibility: p.visibility === undefined ? 1 : p.visibility }))
+  );
+}
+function isVisible(p) {
+  return p && p.visibility > 0.5 && p.x > -50 && p.x < width + 50 && p.y > -50 && p.y < height + 50;
+}
+
+// 手腕触发判定点的半径与状态
+const TRIGGER_RADIUS = 50;
+let handZone = [-1, -1];            // 每只手当前所在判定点索引，-1 表示不在任何点内
+
+// ---------------------------------------------------------------------------
 // 尺寸常量（每帧根据画布尺寸重新计算）
 // ---------------------------------------------------------------------------
 let discRadius;   // 中心圆盘半径 = min(width, height) * 0.30
@@ -76,6 +136,11 @@ function draw() {
     drawNotes();
     drawMissEffects();
     drawParticles();
+
+    // 手势：更新姿态 → 画手腕悬停特效 → 检测手腕进入判定点（画在最上层）
+    updatePoses();
+    drawHover();
+    checkHandHits();
 
     // 结束条件：所有音符都生成完，且场上已无音符 → 结算
     if (!gameEnded && spawnedCount >= totalNotes && notes.length === 0) {
@@ -395,8 +460,8 @@ function playJudgeSound(type) {
 }
 
 /**
- * 键盘输入（临时方案）：按 1~8 键模拟 8 个判定点。
- * 注意：模块 8 会用手势识别替换这里的输入入口（直接调用 hitJudge(angleIndex)）。
+ * 键盘输入（调试备用）：按 1~8 键模拟 8 个判定点。
+ * 正式输入由摄像头手势识别（checkHandHits）提供，此处保留便于无摄像头时测试。
  */
 function keyPressed() {
   if (!gameStarted) return;
@@ -404,6 +469,86 @@ function keyPressed() {
   if (key >= '1' && key <= '8') {
     const angleIndex = int(key) - 1; // '1' → 0 … '8' → 7
     hitJudge(angleIndex);
+  }
+}
+
+/**
+ * 判定点坐标（第 i 个判定点，0 号在正上方、顺时针）。
+ */
+function judgePointPosition(i) {
+  const ang = i * TWO_PI / 8 - PI / 2;
+  return {
+    x: width / 2 + cos(ang) * judgeRadius,
+    y: height / 2 + sin(ang) * judgeRadius,
+  };
+}
+
+/**
+ * 手腕悬停特效：让玩家实时看到自己的手在屏幕上的位置。
+ * 两只手腕各画两层半透明圆（外层白、内层青）。
+ */
+function drawHover() {
+  const person = poses[0];
+  if (!person) return;
+
+  const wrists = [BODY.L_WRIST, BODY.R_WRIST];
+
+  push();
+  noStroke();
+  for (const idx of wrists) {
+    const p = person[idx];
+    if (!isVisible(p)) continue;
+
+    // 外层：白色 alpha 60
+    fill(255, 255, 255, 60);
+    circle(p.x, p.y, 46);
+
+    // 内层：青色 #00d4ff alpha 120
+    fill(0, 212, 255, 120);
+    circle(p.x, p.y, 30);
+  }
+  pop();
+}
+
+/**
+ * 手腕命中检测：手腕「刚进入」某个判定点范围时触发一次 hitJudge。
+ * 停在原地不会重复触发，离开后可再次触发。
+ */
+function checkHandHits() {
+  const person = poses[0];
+  if (!person) return;
+
+  const wrists = [BODY.L_WRIST, BODY.R_WRIST];
+
+  for (let h = 0; h < wrists.length; h++) {
+    const p = person[wrists[h]];
+
+    // 手腕不可见 → 视为离开所有判定点
+    if (!isVisible(p)) {
+      handZone[h] = -1;
+      continue;
+    }
+
+    // 找离手腕最近的判定点
+    let idx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < 8; i++) {
+      const pos = judgePointPosition(i);
+      const d = dist(p.x, p.y, pos.x, pos.y);
+      if (d < bestDist) {
+        bestDist = d;
+        idx = i;
+      }
+    }
+
+    if (bestDist >= TRIGGER_RADIUS) idx = -1;
+
+    // 刚进入判定点 → 触发一次命中
+    if (idx !== -1 && handZone[h] !== idx) {
+      hitJudge(idx);
+    }
+
+    handZone[h] = idx;
   }
 }
 
@@ -677,10 +822,21 @@ function startGame() {
   spawnedCount = 0;
   nextSpawnTime = millis();
 
-  // 界面归零
+    // 界面归零
   updateScore();
   updateJudgeHud();
   updateCombo(); // combo 为 0 → 隐藏并归零 #combo-num
+
+  // 摄像头 + 手势模型（只创建一次，避免重复开流）
+  if (!video) {
+    video = createCapture(VIDEO);
+    video.size(640, 480);
+    video.hide();
+  }
+  if (!poseLandmarker) loadPoseLandmarker();
+
+  // 手腕判定点状态重置
+  handZone = [-1, -1];
 
   // 解锁浏览器音频（必须由用户手势触发）
   if (typeof userStartAudio === 'function') userStartAudio();
