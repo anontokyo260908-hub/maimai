@@ -19,7 +19,7 @@ let judgeRadius;  // 判定圈半径 = min(width, height) * 0.45（8 个点所�
 // p5 生命周期
 // ---------------------------------------------------------------------------
 function setup() {
-  createCanvas(windowWidth, windowHeight);
+  createCanvas(windowWidth, windowHeight).parent('game');
 }
 
 function draw() {

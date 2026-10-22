@@ -394,11 +394,13 @@ input[type="range"]::-moz-range-thumb {
    5. #game 游戏
    -------------------------------------------------------------------------- */
 #game {
-  position: relative;
+  position: fixed;
+  inset: 0;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
 }
+
 
 #game-canvas {
   display: block;
