@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>maimai手势音乐游戏</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 开始菜单 -->
+  <section id="menu">
+    <h1>maimai手势音乐游戏</h1>
+    <p class="sub">Maimai Gesture Rhythm Game</p>
+    <ul class="menu-rules">
+      <li>在判定区域内挥动手臂演奏曲子吧</li>
+      <li>红色点击音符——手指张开聚拢</li>
+      <li>黄色长按音符——手指持续点击判定点</li>
+      <li>星星——手臂跟随滑动</li>
+      <li>游戏有四种判定：perfect、great、good、miss，除 miss 外连击可累积 combo</li>
+    </ul>
+    <div class="menu-buttons">
+      <button id="btn-tutorial">教程</button>
+      <button id="btn-settings">设置</button>
+      <button id="btn-start">开始游戏</button>
+    </div>
+  </section>
+
+  <!-- 教程 -->
+  <section id="tutorial" hidden>
+    <button id="btn-tutorial-back">返回</button>
+    <h2>教程</h2>
+    <div class="tutorial-body"></div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="settings" hidden>
+    <button id="btn-settings-back">返回</button>
+    <h2>设置</h2>
+    <div class="settings-body">
+
+      <!-- 流速设置 -->
+      <div class="setting-row">
+        <label for="speed-slider">流速 (Note Speed)</label>
+        <input type="range" id="speed-slider" min="1" max="10" step="0.5" value="5">
+        <span id="speed-value">5</span>
+      </div>
+
+      <!-- 延迟设置 -->
+      <div class="setting-row">
+        <label for="offset-slider">延迟 (Offset)</label>
+        <input type="range" id="offset-slider" min="-200" max="200" step="5" value="0">
+        <span id="offset-value">0</span>
+      </div>
+
+      <!-- 延迟校准测试 -->
+      <div class="calibrate">
+        <h3>延迟校准测试</h3>
+        <p class="calibrate-tip">跟随鼓点打节拍，系统会测出你的判定偏差</p>
+        <button id="btn-calibrate">开始测试</button>
+        <button id="btn-recalibrate" hidden>重测</button>
+        <div id="beat-indicator"></div>
+        <div id="calibrate-feedback"></div>
+        <div id="calibrate-result"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 游戏 -->
+  <section id="game" hidden>
+    <canvas id="game-canvas"></canvas>
+    <div id="hud">
+      <span id="score">0</span>
+      <span id="combo">0</span>
+      <span id="judge-text"></span>
+    </div>
+  </section>
+
+  <!-- 结算 -->
+  <section id="result" hidden>
+    <h2>结算</h2>
+    <div id="result-body"></div>
+    <button id="btn-restart">重新开始</button>
+  </section>
+
+</body>
+</html>
