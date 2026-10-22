@@ -35,7 +35,8 @@ const HOLD_LENGTH = 90;             // 长按胶囊长度（像素；后续可�
 let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 millis()）
 
 let judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 }; // 各判定计数
-let effects = [];                   // 打击特效 {x, y, color, start}
+let particles = [];                 // 命中星星散落粒子 {x,y,vx,vy,angle,spin,size,color,start}
+let missEffects = [];               // miss 淡蓝圆环 {x, y, start}
 let judgeOsc, judgeEnv;             // 判定音效（振荡器 + 包络）
 
 // ---------------------------------------------------------------------------
@@ -56,14 +57,15 @@ function draw() {
   discRadius = min(width, height) * 0.30;
   judgeRadius = min(width, height) * 0.45;
 
-  if (!gameStarted) return; // 未开始时只留背景
+    if (!gameStarted) return; // 未开始时只留背景
 
-    drawDisc();
+  drawDisc();
   drawJudgePoints();
 
   updateNotes();
   drawNotes();
-  drawEffects();
+  drawMissEffects();
+  drawParticles();
 }
 
 /** 窗口缩放：让画布跟随视口尺寸 */
@@ -180,7 +182,7 @@ function updateNotes() {
   }
 
     // 更新 / 移除：倒序便于 splice
-  for (let i = notes.length - 1; i >= 0; i--) {
+    for (let i = notes.length - 1; i >= 0; i--) {
     const n = notes[i];
     const travel = n.type === 'star' ? STAR_TRAVEL_TIME : NOTE_TRAVEL_TIME;
     const progress = (now - n.spawnTime) / travel;
@@ -190,18 +192,13 @@ function updateNotes() {
       judgeCounts.miss++;
       updateJudgeHud();
       playJudgeSound('miss');
-      spawnEffect(n, 'miss');
+      spawnMissEffect(n); // 淡蓝圆环
       notes.splice(i, 1);
       continue;
     }
 
-    if (progress >= 1) {
-      // 已到达终点，先移除
-      notes.splice(i, 1);
-      continue;
-    }
-
-    n.progress = progress;
+    // 到达判定圈后停住（progress 上限为 1），等判定窗口结束
+    n.progress = min(progress, 1);
   }
 }
 
@@ -429,7 +426,10 @@ function applyJudge(note, type) {
   judgeCounts[type]++;
   updateJudgeHud();
   playJudgeSound(type);
-  spawnEffect(note, type);
+
+  // 命中特效：在目标判定点散落星星粒子
+  const pos = noteTargetPosition(note);
+  spawnHitEffect(pos.x, pos.y, JUDGE_COLORS[type]);
 
   const idx = notes.indexOf(note);
   if (idx !== -1) notes.splice(idx, 1);
@@ -463,22 +463,96 @@ function noteTargetPosition(note) {
 }
 
 /**
- * 在音符目标位置生成一次打击特效。
+ * 命中特效：在 (x, y) 处散落约 16 颗小星星粒子。
  */
-function spawnEffect(note, type) {
-  const pos = noteTargetPosition(note);
-  effects.push({
-    x: pos.x,
-    y: pos.y,
-    color: JUDGE_COLORS[type],
-    start: millis(),
-  });
+function spawnHitEffect(x, y, color) {
+  const count = 16;
+
+  for (let i = 0; i < count; i++) {
+    const a = random(TWO_PI);
+    const sp = random(1.5, 5);
+
+    particles.push({
+      x: x,
+      y: y,
+      vx: cos(a) * sp,
+      vy: sin(a) * sp,
+      angle: random(TWO_PI),
+      spin: random(-0.2, 0.2),
+      size: random(5, 14),
+      color: color,
+      start: millis(),
+    });
+  }
 }
 
 /**
- * 绘制打击特效：300ms 内向外扩散并淡出的空心圆。
+ * 绘制命中粒子：500ms 内向外散开、旋转并淡出，每颗是四角星 sparkle。
  */
-function drawEffects() {
+function drawParticles() {
+  const now = millis();
+  const LIFE = 500;
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    const elapsed = now - p.start;
+
+    if (elapsed > LIFE) {
+      particles.splice(i, 1);
+      continue;
+    }
+
+    // 运动与自转
+    p.x += p.vx;
+    p.y += p.vy;
+    p.angle += p.spin;
+
+    // 透明度从 220 线性衰减到 0
+    const a = 220 * (1 - elapsed / LIFE);
+    const c = color(p.color);
+    c.setAlpha(a);
+
+    drawSparkle(p.x, p.y, p.angle, p.size, c);
+  }
+}
+
+/**
+ * 四角星 sparkle：以 (x, y) 为圆心、按 angle 旋转、半径 s。
+ */
+function drawSparkle(x, y, angle, s, col) {
+  push();
+  translate(x, y);
+  rotate(angle);
+
+  noStroke();
+  fill(col);
+
+  beginShape();
+  vertex(0, -s);
+  vertex(s * 0.25, -s * 0.25);
+  vertex(s, 0);
+  vertex(s * 0.25, s * 0.25);
+  vertex(0, s);
+  vertex(-s * 0.25, s * 0.25);
+  vertex(-s, 0);
+  vertex(-s * 0.25, -s * 0.25);
+  endShape(CLOSE);
+
+  pop();
+}
+
+/**
+ * miss 特效：在音符目标判定点记录一个淡蓝圆环。
+ */
+function spawnMissEffect(note) {
+  const pos = noteTargetPosition(note);
+  missEffects.push({ x: pos.x, y: pos.y, start: millis() });
+}
+
+/**
+ * 绘制 miss 特效：300ms 内向外扩散并淡出的淡蓝空心圆。
+ */
+function drawMissEffects() {
   const now = millis();
   const LIFE = 300;
 
@@ -486,18 +560,18 @@ function drawEffects() {
   noFill();
   strokeWeight(3);
 
-  for (let i = effects.length - 1; i >= 0; i--) {
-    const e = effects[i];
+  for (let i = missEffects.length - 1; i >= 0; i--) {
+    const e = missEffects[i];
     const p = (now - e.start) / LIFE;
 
     if (p >= 1) {
-      effects.splice(i, 1);
+      missEffects.splice(i, 1);
       continue;
     }
 
     const r = map(p, 0, 1, 10, 50);
-    const c = color(e.color);
-    c.setAlpha(255 * (1 - p)); // 逐渐淡出
+    const c = color(JUDGE_COLORS.miss); // 淡蓝 #4a90e2
+    c.setAlpha(255 * (1 - p));
     stroke(c);
     circle(e.x, e.y, r * 2);
   }
@@ -515,9 +589,10 @@ function startGame() {
   if (typeof userStartAudio === 'function') userStartAudio();
   initSounds();
 
-  // 重置音符与判定状态，保证每局从头开始
+    // 重置音符与判定状态，保证每局从头开始
   notes = [];
-  effects = [];
+  particles = [];
+  missEffects = [];
   judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 };
   updateJudgeHud();
   nextSpawnTime = millis();
