@@ -39,6 +39,16 @@ let particles = [];                 // 命中星星散落粒子 {x,y,vx,vy,angle
 let missEffects = [];               // miss 淡蓝圆环 {x, y, start}
 let judgeOsc, judgeEnv;             // 判定音效（振荡器 + 包络）
 
+// 分数与连击
+let score = 0;
+let combo = 0;
+let maxCombo = 0;
+let totalNotes = 30;                // 本局总音符数（测试用，后续换谱面）
+let spawnedCount = 0;               // 已生成音符数
+let gameEnded = false;              // 是否已结算（避免重复触发 endGame）
+
+const SCORE_TABLE = { perfect: 1000, great: 500, good: 100 }; // 计分规则（miss 不加分）
+
 // ---------------------------------------------------------------------------
 // 尺寸常量（每帧根据画布尺寸重新计算）
 // ---------------------------------------------------------------------------
@@ -59,13 +69,18 @@ function draw() {
 
     if (!gameStarted) return; // 未开始时只留背景
 
-  drawDisc();
-  drawJudgePoints();
+    drawDisc();
+    drawJudgePoints();
 
-  updateNotes();
-  drawNotes();
-  drawMissEffects();
-  drawParticles();
+    updateNotes();
+    drawNotes();
+    drawMissEffects();
+    drawParticles();
+
+    // 结束条件：所有音符都生成完，且场上已无音符 → 结算
+    if (!gameEnded && spawnedCount >= totalNotes && notes.length === 0) {
+      endGame();
+    }
 }
 
 /** 窗口缩放：让画布跟随视口尺寸 */
@@ -135,6 +150,10 @@ function drawJudgePoints() {
  * - star：沿判定圈从一个判定点滑向相邻判定点（顺/逆时针随机）
  */
 function spawnNote() {
+  // 已生成本局全部音符后不再生成
+  if (spawnedCount >= totalNotes) return;
+
+  spawnedCount++;
   const type = random(['tap', 'tap', 'tap', 'hold', 'star']);
   const spawnTime = millis();
 
@@ -175,14 +194,14 @@ function spawnNote() {
 function updateNotes() {
   const now = millis();
 
-  // 生成：每隔一拍（60000 / BPM 毫秒）生成一个
-  if (now >= nextSpawnTime) {
+    // 生成：每隔一拍（60000 / BPM 毫秒）生成一个，直到生满 totalNotes
+  if (now >= nextSpawnTime && spawnedCount < totalNotes) {
     spawnNote();
     nextSpawnTime += 60000 / BPM;
   }
 
-    // 更新 / 移除：倒序便于 splice
-    for (let i = notes.length - 1; i >= 0; i--) {
+  // 更新 / 移除：倒序便于 splice
+  for (let i = notes.length - 1; i >= 0; i--) {
     const n = notes[i];
     const travel = n.type === 'star' ? STAR_TRAVEL_TIME : NOTE_TRAVEL_TIME;
     const progress = (now - n.spawnTime) / travel;
@@ -193,6 +212,8 @@ function updateNotes() {
       updateJudgeHud();
       playJudgeSound('miss');
       spawnMissEffect(n); // 淡蓝圆环
+      combo = 0;          // 断连击
+      updateCombo();
       notes.splice(i, 1);
       continue;
     }
@@ -427,12 +448,72 @@ function applyJudge(note, type) {
   updateJudgeHud();
   playJudgeSound(type);
 
+  // 计分与连击（miss 走自动 miss 分支，不经过这里）
+  score += SCORE_TABLE[type];
+  combo++;
+  maxCombo = max(maxCombo, combo);
+  updateScore();
+  updateCombo();
+
   // 命中特效：在目标判定点散落星星粒子
   const pos = noteTargetPosition(note);
   spawnHitEffect(pos.x, pos.y, JUDGE_COLORS[type]);
 
   const idx = notes.indexOf(note);
   if (idx !== -1) notes.splice(idx, 1);
+}
+
+/**
+ * 把 score 同步到左上角分数框。
+ */
+function updateScore() {
+  const el = document.getElementById('score-box');
+  if (el) el.textContent = score;
+}
+
+/**
+ * 更新连击显示：combo >= 2 时显示并播放 pop 动画，否则隐藏。
+ */
+function updateCombo() {
+  const box = document.getElementById('combo-box');
+  const num = document.getElementById('combo-num');
+  if (!box || !num) return;
+
+  if (combo >= 2) {
+    box.hidden = false;
+    num.textContent = combo;
+
+    // 重新触发 pop 动画：移除类 → 强制 reflow → 再加类
+    num.classList.remove('pop');
+    void num.offsetWidth;
+    num.classList.add('pop');
+  } else {
+    box.hidden = true;
+    num.textContent = 0;
+  }
+}
+
+/**
+ * 结算：把成绩写入 #result-body，切换到结算界面。
+ */
+function endGame() {
+  gameEnded = true;
+  gameStarted = false;
+
+  const body = document.getElementById('result-body');
+  if (body) {
+    body.innerHTML = `
+      <p>分数：${score}</p>
+      <p>最大连击：${maxCombo}</p>
+      <p>PERFECT：${judgeCounts.perfect}</p>
+      <p>GREAT：${judgeCounts.great}</p>
+      <p>GOOD：${judgeCounts.good}</p>
+      <p>MISS：${judgeCounts.miss}</p>
+    `;
+  }
+
+  hide('game');
+  show('result');
 }
 
 /**
@@ -583,18 +664,26 @@ function drawMissEffects() {
 // 游戏初始化入口（由 main.js 在点击「开始游戏」时调用）
 // ---------------------------------------------------------------------------
 function startGame() {
+  // 重置分数、连击、判定计数与场上对象，保证每局从头开始
   gameStarted = true;
+  gameEnded = false;
+  score = 0;
+  combo = 0;
+  maxCombo = 0;
+  judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 };
+  notes = [];
+  particles = [];
+  missEffects = [];
+  spawnedCount = 0;
+  nextSpawnTime = millis();
+
+  // 界面归零
+  updateScore();
+  updateJudgeHud();
+  updateCombo(); // combo 为 0 → 隐藏并归零 #combo-num
 
   // 解锁浏览器音频（必须由用户手势触发）
   if (typeof userStartAudio === 'function') userStartAudio();
   initSounds();
-
-    // 重置音符与判定状态，保证每局从头开始
-  notes = [];
-  particles = [];
-  missEffects = [];
-  judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 };
-  updateJudgeHud();
-  nextSpawnTime = millis();
 }
 
