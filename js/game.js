@@ -26,6 +26,7 @@ const JUDGE_COLORS = {
 // 全局状态
 // ---------------------------------------------------------------------------
 let gameStarted = false;
+let paused = false;
 
 let notes = [];                     // 存放所有音符
 const BPM = 120;                    // 节拍速度，后续可连设置
@@ -139,6 +140,16 @@ function draw() {
   judgeRadius = min(width, height) * 0.45;
 
     if (!gameStarted) return; // 未开始时只留背景
+
+    // 暂停：只重绘静止画面（不更新音符、不检测手势）
+    if (paused) {
+      drawDisc();
+      drawJudgePoints();
+      drawNotes();
+      drawMissEffects();
+      drawParticles();
+      return;
+    }
 
     drawDisc();
     drawJudgePoints();
@@ -868,4 +879,37 @@ function startGame() {
   if (typeof userStartAudio === 'function') userStartAudio();
   initSounds();
 }
+
+// ---------------------------------------------------------------------------
+// 暂停
+// ---------------------------------------------------------------------------
+function pauseGame() {
+  paused = true;
+  show('pause');
+}
+
+function resumeGame() {
+  paused = false;
+  nextSpawnTime = millis(); // 避免暂停期间积压的音符在恢复后集中生成
+  hide('pause');
+}
+
+function pauseRestart() {
+  paused = false;
+  hide('pause');
+  startGame();
+}
+
+function pauseQuit() {
+  paused = false;
+  gameStarted = false;
+  hide('pause');
+  hide('game');
+  show('menu');
+}
+
+document.getElementById('btn-pause').addEventListener('click', pauseGame);
+document.getElementById('btn-resume').addEventListener('click', resumeGame);
+document.getElementById('btn-pause-restart').addEventListener('click', pauseRestart);
+document.getElementById('btn-quit').addEventListener('click', pauseQuit);
 
