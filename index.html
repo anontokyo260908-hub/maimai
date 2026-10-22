@@ -69,15 +69,25 @@
   </section>
 
   <!-- 游戏 -->
-    <section id="game" hidden>
+        <section id="game" hidden>
         <div id="hud">
-      <span id="score">0</span>
-      <span id="combo">0</span>
+      <div class="judge-item">
+        <span class="judge-name judge-perfect">PERFECT</span>
+        <span class="judge-count" id="judge-perfect">0</span>
+      </div>
+      <div class="judge-item">
+        <span class="judge-name judge-great">GREAT</span>
+        <span class="judge-count" id="judge-great">0</span>
+      </div>
+      <div class="judge-item">
+        <span class="judge-name judge-good">GOOD</span>
+        <span class="judge-count" id="judge-good">0</span>
+      </div>
+      <div class="judge-item">
+        <span class="judge-name judge-miss">MISS</span>
+        <span class="judge-count" id="judge-miss">0</span>
+      </div>
       <span id="judge-text"></span>
-      <span id="judge-perfect">P 0</span>
-      <span id="judge-great">GR 0</span>
-      <span id="judge-good">GD 0</span>
-      <span id="judge-miss">M 0</span>
     </div>
   </section>
 
