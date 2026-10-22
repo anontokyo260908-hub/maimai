@@ -118,13 +118,14 @@ function isVisible(p) {
 
 // 手腕触发判定点的半径与状态
 const TRIGGER_RADIUS = 360; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
-let handZone = [-1, -1];            // 每只手当前所在判定点索引，-1 表示不在任何点内
+let handZone = [-1, -1];            // （旧：进入判定点触发，已被抓握检测取代）
+let pinchState = [false, false];    // 每只手当前是否「握紧」
 
 // ---------------------------------------------------------------------------
 // 尺寸常量（每帧根据画布尺寸重新计算）
 // ---------------------------------------------------------------------------
 let discRadius;   // 中心圆盘半径 = min(width, height) * 0.30
-let judgeRadius;  // 判定圈半径 = min(width, height) * 0.45（8 个点所在的圈）
+let judgeRadius;  // 判定圈半径 = min(width, height) * 0.38（8 个点所在的圈，比圆盘略外）
 let cameraAlpha = 255; // 摄像头背景透明度（0~255），默认完全显示
 // ---------------------------------------------------------------------------
 // p5 生命周期
@@ -137,7 +138,7 @@ function setup() {
 function draw() {
   background(11, 11, 20); // --bg #0b0b14
   discRadius = min(width, height) * 0.30;
-  judgeRadius = min(width, height) * 0.45;
+  judgeRadius = min(width, height) * 0.38;
 
     if (!gameStarted) return; // 未开始时只留背景
 
@@ -163,6 +164,7 @@ function draw() {
     updatePoses();
     drawHover();
     checkHandHits();
+    drawDebug(); // 调试：触发范围 + 手指关键点 + 抓握比（正式版可移除）
 
     // 调试：每 2 秒输出一次手势状态
     if (millis() - lastPoseLog > 2000) {
@@ -548,23 +550,108 @@ function drawHover() {
 }
 
 /**
+ * 调试可视化：画出每个判定点的触发范围（淡青圆），以及手部关键点
+ * （手腕=青点、拇指=红点、食指=绿点）和抓握比 ratio 数值。
+ * 抓握比 ratio < 0.7 判定为「握紧」；看着数值便于调灵敏度。
+ */
+function drawDebug() {
+  push();
+  // 1) 每个判定点的触发范围（淡青大圆，直径 = TRIGGER_RADIUS*2）
+  noFill();
+  stroke(0, 212, 255, 55);
+  strokeWeight(1);
+  for (let i = 0; i < 8; i++) {
+    const pos = judgePointPosition(i);
+    circle(pos.x, pos.y, TRIGGER_RADIUS * 2);
+  }
+
+  // 2) 手部关键点 + 抓握比
+  const person = poses[0];
+  if (person) {
+    for (let h = 0; h < 2; h++) {
+      const wristIdx = h === 0 ? BODY.L_WRIST : BODY.R_WRIST;
+      const indexIdx = h === 0 ? BODY.L_INDEX : BODY.R_INDEX;
+      const thumbIdx = h === 0 ? BODY.L_THUMB : BODY.R_THUMB;
+      const wrist = person[wristIdx];
+      const index = person[indexIdx];
+      const thumb = person[thumbIdx];
+
+      if (!isVisible(wrist)) continue;
+
+      noStroke();
+      fill(0, 212, 255);      // 手腕：青
+      circle(wrist.x, wrist.y, 10);
+      fill(100, 255, 100);    // 食指：绿
+      if (isVisible(index)) circle(index.x, index.y, 12);
+      fill(255, 100, 100);    // 拇指：红
+      if (isVisible(thumb)) circle(thumb.x, thumb.y, 12);
+
+      // 抓握比文字（看清张开/握紧时 ratio 的变化）
+      if (isVisible(index) && isVisible(thumb)) {
+        const handScale = max(dist(wrist.x, wrist.y, index.x, index.y), 1);
+        const pinch = dist(index.x, index.y, thumb.x, thumb.y);
+        const ratio = pinch / handScale;
+        fill(255);
+        textSize(14);
+        textAlign(CENTER, CENTER);
+        text('ratio ' + ratio.toFixed(2), wrist.x, wrist.y - 24);
+      }
+    }
+  }
+  pop();
+}
+
+/**
  * 手腕命中检测：手腕「刚进入」某个判定点范围时触发一次 hitJudge。
  * 停在原地不会重复触发，离开后可再次触发。
+ */
+/**
+ * 抓握检测：根据拇指(thumb)与食指(index)的距离判断手是否「握紧」。
+ * 用「手腕到食指」的距离作为手的大小基准，避免人离镜头远近的影响。
+ * 返回是否「刚发生握紧动作」（从张开到合拢的瞬间）。
+ * h: 0=左手, 1=右手
+ */
+function updateGrasp(h, person) {
+  const wristIdx = h === 0 ? BODY.L_WRIST : BODY.R_WRIST;
+  const indexIdx = h === 0 ? BODY.L_INDEX : BODY.R_INDEX;
+  const thumbIdx = h === 0 ? BODY.L_THUMB : BODY.R_THUMB;
+
+  const wrist = person[wristIdx];
+  const index = person[indexIdx];
+  const thumb = person[thumbIdx];
+
+  // 手腕、食指、拇指三个点都必须可见，否则视为没握拳
+  if (!isVisible(wrist) || !isVisible(index) || !isVisible(thumb)) {
+    pinchState[h] = false;
+    return false;
+  }
+
+  const handScale = max(dist(wrist.x, wrist.y, index.x, index.y), 1);
+  const pinch = dist(index.x, index.y, thumb.x, thumb.y);
+  const ratio = pinch / handScale;
+
+  const isGrasped = ratio < 0.7; // 拇指食指靠得够近 = 握紧（可调这个 0.7）
+
+  const wasGrasped = pinchState[h];
+  pinchState[h] = isGrasped;
+
+  // 只在本帧「从张开变握紧」时返回 true
+  return isGrasped && !wasGrasped;
+}
+
+/**
+ * 手腕命中检测：检测到「握紧」动作时，找离手腕最近的判定点触发一次命中。
  */
 function checkHandHits() {
   const person = poses[0];
   if (!person) return;
 
-  const wrists = [BODY.L_WRIST, BODY.R_WRIST];
+  for (let h = 0; h < 2; h++) {
+    // 检测本帧是否发生握拳动作（内部处理可见性）
+    if (!updateGrasp(h, person)) continue;
 
-  for (let h = 0; h < wrists.length; h++) {
-    const p = person[wrists[h]];
-
-    // 手腕不可见 → 视为离开所有判定点
-    if (!isVisible(p)) {
-      handZone[h] = -1;
-      continue;
-    }
+    const wristIdx = h === 0 ? BODY.L_WRIST : BODY.R_WRIST;
+    const p = person[wristIdx];
 
     // 找离手腕最近的判定点
     let idx = -1;
@@ -580,12 +667,7 @@ function checkHandHits() {
 
     if (bestDist >= TRIGGER_RADIUS) idx = -1;
 
-    // 刚进入判定点 → 触发一次命中
-    if (idx !== -1 && handZone[h] !== idx) {
-      hitJudge(idx);
-    }
-
-    handZone[h] = idx;
+    if (idx !== -1) hitJudge(idx);
   }
 }
 
@@ -874,6 +956,7 @@ function startGame() {
 
   // 手腕判定点状态重置
   handZone = [-1, -1];
+  pinchState = [false, false];
 
   // 解锁浏览器音频（必须由用户手势触发）
   if (typeof userStartAudio === 'function') userStartAudio();
