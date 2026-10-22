@@ -51,7 +51,7 @@ let gameEnded = false;              // 是否已结算（避免重复触发 endG
 const SCORE_TABLE = { perfect: 1000, great: 500, good: 100 }; // 计分规则（miss 不加分）
 
 // ---------------------------------------------------------------------------
-// 手势引擎（MediaPipe Pose Landmarker）
+// 手势引擎（MediaPipe Gesture Recognizer：识别「握拳/张开手掌」等手势）
 // ---------------------------------------------------------------------------
 const MP_VERSION = "0.10.21";
 const MP_URLS = [
@@ -59,20 +59,15 @@ const MP_URLS = [
   `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`,
 ];
 const MODEL_URLS = [
-  "pose_landmarker_lite.task",
-  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+  "gesture_recognizer.task",
+  "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
 ];
-const BODY = {
-  L_SHOULDER: 11, R_SHOULDER: 12,
-  L_ELBOW: 13, R_ELBOW: 14,
-  L_WRIST: 15, R_WRIST: 16,
-  L_PINKY: 17, L_INDEX: 18, L_THUMB: 19,
-  R_PINKY: 20, R_INDEX: 21, R_THUMB: 22,
-};
-let video, poseLandmarker = null, poses = [], lastVideoTime = -1;
+
+let video, recognizer = null, hands = [], lastVideoTime = -1;
 let lastPoseLog = 0; // 调试用：上次输出手势状态的时间
-async function loadPoseLandmarker() {
-  console.log('[手势] 开始加载姿态模型…');
+
+async function loadGestureRecognizer() {
+  console.log('[手势] 开始加载手势模型…');
   for (const base of MP_URLS) {
     let vision, fileset;
     try {
@@ -86,10 +81,10 @@ async function loadPoseLandmarker() {
     for (const model of MODEL_URLS) {
       for (const delegate of ["GPU", "CPU"]) {
         try {
-          poseLandmarker = await vision.PoseLandmarker.createFromOptions(fileset, {
+          recognizer = await vision.GestureRecognizer.createFromOptions(fileset, {
             baseOptions: { modelAssetPath: model, delegate },
             runningMode: "VIDEO",
-            numPoses: 1,
+            numHands: 2,
           });
           console.log('[手势] 模型加载成功：', model, 'delegate=', delegate);
           return;
@@ -99,27 +94,32 @@ async function loadPoseLandmarker() {
       }
     }
   }
-  console.error('[手势] 姿态模型加载全部失败！');
+  console.error('[手势] 手势模型加载全部失败！');
 }
-function updatePoses() {
-  if (!poseLandmarker || !video) return;
+
+// 每一帧：向模型要最新的手势与 21 个手部关键点，换算成镜像后的画布像素坐标
+function updateHands() {
+  if (!recognizer || !video) return;
   if (video.elt.readyState < 2) return;
   if (video.elt.currentTime === lastVideoTime) return;
   lastVideoTime = video.elt.currentTime;
-  const result = poseLandmarker.detectForVideo(video.elt, performance.now());
-  poses = result.landmarks.map((pts) =>
-    pts.map((p) => ({ x: (1 - p.x) * width, y: p.y * height,
-      visibility: p.visibility === undefined ? 1 : p.visibility }))
-  );
-}
-function isVisible(p) {
-  return p && p.visibility > 0.5 && p.x > -50 && p.x < width + 50 && p.y > -50 && p.y < height + 50;
+
+  const result = recognizer.recognizeForVideo(video.elt, performance.now());
+  const sides = result.handedness || result.handednesses || [];
+  hands = result.landmarks.map((lm, i) => {
+    const best = (result.gestures[i] && result.gestures[i][0]) || { categoryName: "None", score: 0 };
+    return {
+      gesture: best.categoryName || "None",
+      score: best.score,
+      side: sides[i] && sides[i][0] ? sides[i][0].categoryName : "",
+      points: lm.map((p) => ({ x: (1 - p.x) * width, y: p.y * height, z: p.z })),
+    };
+  });
 }
 
 // 手腕触发判定点的半径与状态
-const TRIGGER_RADIUS = 360; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
-let handZone = [-1, -1];            // （旧：进入判定点触发，已被抓握检测取代）
-let pinchState = [false, false];    // 每只手当前是否「握紧」
+const TRIGGER_RADIUS = 150; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
+let fistState = {};                 // 每只手(side)当前是否处于「握拳」状态
 
 // ---------------------------------------------------------------------------
 // 尺寸常量（每帧根据画布尺寸重新计算）
@@ -160,18 +160,18 @@ function draw() {
     drawMissEffects();
     drawParticles();
 
-    // 手势：更新姿态 → 画手腕悬停特效 → 检测手腕进入判定点（画在最上层）
-    updatePoses();
+    // 手势：更新手势 → 画手腕悬停特效 → 检测握拳命中（画在最上层）
+    updateHands();
     drawHover();
     checkHandHits();
-    drawDebug(); // 调试：触发范围 + 手指关键点 + 抓握比（正式版可移除）
+    drawDebug(); // 调试：触发范围 + 手势名 + 把握度（正式版可移除）
 
     // 调试：每 2 秒输出一次手势状态
     if (millis() - lastPoseLog > 2000) {
       lastPoseLog = millis();
-      console.log('[手势] 状态:', 'poseLandmarker=', !!poseLandmarker,
+      console.log('[手势] 状态:', 'recognizer=', !!recognizer,
         'video就绪=', !!video && video.elt.readyState >= 2,
-        '检测到人数=', poses.length);
+        '检测到手数=', hands.length);
     }
 
     // （结算条件已移除：等导入歌曲后，改成「歌曲播放完 → 结算」）
@@ -524,35 +524,24 @@ function judgePointPosition(i) {
 
 /**
  * 手腕悬停特效：让玩家实时看到自己的手在屏幕上的位置。
- * 两只手腕各画两层半透明圆（外层白、内层青）。
+ * 每只手的手腕画两层半透明圆（外层白、内层青）。
  */
 function drawHover() {
-  const person = poses[0];
-  if (!person) return;
-
-  const wrists = [BODY.L_WRIST, BODY.R_WRIST];
-
   push();
   noStroke();
-  for (const idx of wrists) {
-    const p = person[idx];
-    if (!isVisible(p)) continue;
-
-    // 外层：白色 alpha 60
+  for (const hand of hands) {
+    const w = hand.points[0]; // 手腕
     fill(255, 255, 255, 60);
-    circle(p.x, p.y, 46);
-
-    // 内层：青色 #00d4ff alpha 120
+    circle(w.x, w.y, 46);
     fill(0, 212, 255, 120);
-    circle(p.x, p.y, 30);
+    circle(w.x, w.y, 30);
   }
   pop();
 }
 
 /**
- * 调试可视化：画出每个判定点的触发范围（淡青圆），以及手部关键点
- * （手腕=青点、拇指=红点、食指=绿点）和抓握比 ratio 数值。
- * 抓握比 ratio < 0.7 判定为「握紧」；看着数值便于调灵敏度。
+ * 调试可视化：画出每个判定点的触发范围（淡青圆），以及每只手的手腕点
+ * 和识别到的手势名 + 把握度（比如 Closed_Fist 95%）。
  */
 function drawDebug() {
   push();
@@ -565,109 +554,50 @@ function drawDebug() {
     circle(pos.x, pos.y, TRIGGER_RADIUS * 2);
   }
 
-  // 2) 手部关键点 + 抓握比
-  const person = poses[0];
-  if (person) {
-    for (let h = 0; h < 2; h++) {
-      const wristIdx = h === 0 ? BODY.L_WRIST : BODY.R_WRIST;
-      const indexIdx = h === 0 ? BODY.L_INDEX : BODY.R_INDEX;
-      const thumbIdx = h === 0 ? BODY.L_THUMB : BODY.R_THUMB;
-      const wrist = person[wristIdx];
-      const index = person[indexIdx];
-      const thumb = person[thumbIdx];
+  // 2) 手部：手腕点 + 手势名 + 把握度
+  for (const hand of hands) {
+    const w = hand.points[0]; // 手腕
+    noStroke();
+    fill(0, 212, 255);
+    circle(w.x, w.y, 10);
 
-      if (!isVisible(wrist)) continue;
-
-      noStroke();
-      fill(0, 212, 255);      // 手腕：青
-      circle(wrist.x, wrist.y, 10);
-      fill(100, 255, 100);    // 食指：绿
-      if (isVisible(index)) circle(index.x, index.y, 12);
-      fill(255, 100, 100);    // 拇指：红
-      if (isVisible(thumb)) circle(thumb.x, thumb.y, 12);
-
-      // 抓握比文字（看清张开/握紧时 ratio 的变化）
-      if (isVisible(index) && isVisible(thumb)) {
-        const handScale = max(dist(wrist.x, wrist.y, index.x, index.y), 1);
-        const pinch = dist(index.x, index.y, thumb.x, thumb.y);
-        const ratio = pinch / handScale;
-        fill(255);
-        textSize(14);
-        textAlign(CENTER, CENTER);
-        text('ratio ' + ratio.toFixed(2), wrist.x, wrist.y - 24);
-      }
-    }
+    fill(255);
+    textSize(14);
+    textAlign(CENTER, CENTER);
+    text(hand.gesture + ' ' + round(hand.score * 100) + '%', w.x, w.y - 24);
   }
   pop();
 }
 
 /**
- * 手腕命中检测：手腕「刚进入」某个判定点范围时触发一次 hitJudge。
- * 停在原地不会重复触发，离开后可再次触发。
- */
-/**
- * 抓握检测：根据拇指(thumb)与食指(index)的距离判断手是否「握紧」。
- * 用「手腕到食指」的距离作为手的大小基准，避免人离镜头远近的影响。
- * 返回是否「刚发生握紧动作」（从张开到合拢的瞬间）。
- * h: 0=左手, 1=右手
- */
-function updateGrasp(h, person) {
-  const wristIdx = h === 0 ? BODY.L_WRIST : BODY.R_WRIST;
-  const indexIdx = h === 0 ? BODY.L_INDEX : BODY.R_INDEX;
-  const thumbIdx = h === 0 ? BODY.L_THUMB : BODY.R_THUMB;
-
-  const wrist = person[wristIdx];
-  const index = person[indexIdx];
-  const thumb = person[thumbIdx];
-
-  // 手腕、食指、拇指三个点都必须可见，否则视为没握拳
-  if (!isVisible(wrist) || !isVisible(index) || !isVisible(thumb)) {
-    pinchState[h] = false;
-    return false;
-  }
-
-  const handScale = max(dist(wrist.x, wrist.y, index.x, index.y), 1);
-  const pinch = dist(index.x, index.y, thumb.x, thumb.y);
-  const ratio = pinch / handScale;
-
-  const isGrasped = ratio < 0.7; // 拇指食指靠得够近 = 握紧（可调这个 0.7）
-
-  const wasGrasped = pinchState[h];
-  pinchState[h] = isGrasped;
-
-  // 只在本帧「从张开变握紧」时返回 true
-  return isGrasped && !wasGrasped;
-}
-
-/**
- * 手腕命中检测：检测到「握紧」动作时，找离手腕最近的判定点触发一次命中。
+ * 手腕命中检测：检测到「握拳(Closed_Fist)」手势时，找离手最近的判定点触发一次命中。
+ * 只有「从张开变成握拳」的瞬间才触发一次，持续握拳不会重复触发。
  */
 function checkHandHits() {
-  const person = poses[0];
-  if (!person) return;
+  for (const hand of hands) {
+    // 是否握拳（模型识别为 Closed_Fist，且把握度 >= 0.6）
+    const isFist = hand.gesture === 'Closed_Fist' && hand.score >= 0.6;
+    const wasFist = !!fistState[hand.side];
+    fistState[hand.side] = isFist;
 
-  for (let h = 0; h < 2; h++) {
-    // 检测本帧是否发生握拳动作（内部处理可见性）
-    if (!updateGrasp(h, person)) continue;
+    // 刚从「非握拳」变「握拳」→ 触发命中
+    if (!isFist || wasFist) continue;
 
-    const wristIdx = h === 0 ? BODY.L_WRIST : BODY.R_WRIST;
-    const p = person[wristIdx];
+    const w = hand.points[0]; // 手腕
 
     // 找离手腕最近的判定点
     let idx = -1;
     let bestDist = Infinity;
     for (let i = 0; i < 8; i++) {
       const pos = judgePointPosition(i);
-      const d = dist(p.x, p.y, pos.x, pos.y);
+      const d = dist(w.x, w.y, pos.x, pos.y);
       if (d < bestDist) {
         bestDist = d;
         idx = i;
       }
     }
 
-    if (bestDist >= TRIGGER_RADIUS) idx = -1;
-
-    if (idx !== -1) hitJudge(idx);
+    if (bestDist < TRIGGER_RADIUS && idx !== -1) hitJudge(idx);
   }
 }
 
@@ -952,11 +882,10 @@ function startGame() {
     video.size(640, 480);
     video.hide();
   }
-  if (!poseLandmarker) loadPoseLandmarker();
+  if (!recognizer) loadGestureRecognizer();
 
-  // 手腕判定点状态重置
-  handZone = [-1, -1];
-  pinchState = [false, false];
+  // 手势状态重置
+  fistState = {};
 
   // 解锁浏览器音频（必须由用户手势触发）
   if (typeof userStartAudio === 'function') userStartAudio();
