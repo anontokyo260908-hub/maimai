@@ -69,13 +69,19 @@ const BODY = {
   R_PINKY: 20, R_INDEX: 21, R_THUMB: 22,
 };
 let video, poseLandmarker = null, poses = [], lastVideoTime = -1;
+let lastPoseLog = 0; // 调试用：上次输出手势状态的时间
 async function loadPoseLandmarker() {
+  console.log('[手势] 开始加载姿态模型…');
   for (const base of MP_URLS) {
     let vision, fileset;
     try {
       vision = await import(`${base}/vision_bundle.mjs`);
       fileset = await vision.FilesetResolver.forVisionTasks(`${base}/wasm`);
-    } catch (e) { continue; }
+      console.log('[手势] vision bundle 加载成功：', base);
+    } catch (e) {
+      console.warn('[手势] CDN 加载失败：', base, e);
+      continue;
+    }
     for (const model of MODEL_URLS) {
       for (const delegate of ["GPU", "CPU"]) {
         try {
@@ -84,11 +90,15 @@ async function loadPoseLandmarker() {
             runningMode: "VIDEO",
             numPoses: 1,
           });
+          console.log('[手势] 模型加载成功：', model, 'delegate=', delegate);
           return;
-        } catch (e) {}
+        } catch (e) {
+          console.warn('[手势] 模型创建失败：', model, delegate, e);
+        }
       }
     }
   }
+  console.error('[手势] 姿态模型加载全部失败！');
 }
 function updatePoses() {
   if (!poseLandmarker || !video) return;
@@ -106,7 +116,7 @@ function isVisible(p) {
 }
 
 // 手腕触发判定点的半径与状态
-const TRIGGER_RADIUS = 50;
+const TRIGGER_RADIUS = 360; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
 let handZone = [-1, -1];            // 每只手当前所在判定点索引，-1 表示不在任何点内
 
 // ---------------------------------------------------------------------------
@@ -114,6 +124,7 @@ let handZone = [-1, -1];            // 每只手当前所在判定点索引，-1
 // ---------------------------------------------------------------------------
 let discRadius;   // 中心圆盘半径 = min(width, height) * 0.30
 let judgeRadius;  // 判定圈半径 = min(width, height) * 0.45（8 个点所在的圈）
+let cameraAlpha = 255; // 摄像头背景透明度（0~255），默认完全显示
 // ---------------------------------------------------------------------------
 // p5 生命周期
 // ---------------------------------------------------------------------------
@@ -142,10 +153,15 @@ function draw() {
     drawHover();
     checkHandHits();
 
-    // 结束条件：所有音符都生成完，且场上已无音符 → 结算
-    if (!gameEnded && spawnedCount >= totalNotes && notes.length === 0) {
-      endGame();
+    // 调试：每 2 秒输出一次手势状态
+    if (millis() - lastPoseLog > 2000) {
+      lastPoseLog = millis();
+      console.log('[手势] 状态:', 'poseLandmarker=', !!poseLandmarker,
+        'video就绪=', !!video && video.elt.readyState >= 2,
+        '检测到人数=', poses.length);
     }
+
+    // （结算条件已移除：等导入歌曲后，改成「歌曲播放完 → 结算」）
 }
 
 /** 窗口缩放：让画布跟随视口尺寸 */
@@ -184,6 +200,19 @@ function drawDisc() {
   pop();
 }
 // ---------------------------------------------------------------------------
+// 把摄像头画面镜像后铺满整个画布，作为游戏背景。
+// 透明度由 cameraAlpha 控制，后续可接到设置里的「背景透明度」滑杆。
+// ---------------------------------------------------------------------------
+function drawCamera() {
+  if (!video) return;
+  push();
+  translate(width, 0);
+  scale(-1, 1);       // 镜像，让动作方向跟画面一致
+  tint(255, cameraAlpha); // 透明度（0~255），默认 255 完全不透明
+  image(video, 0, 0, width, height);
+  pop();
+}
+// ---------------------------------------------------------------------------
 // 绘制：外围 8 个判定点（白色小空心圆环）
 // ---------------------------------------------------------------------------
 function drawJudgePoints() {
@@ -215,9 +244,6 @@ function drawJudgePoints() {
  * - star：沿判定圈从一个判定点滑向相邻判定点（顺/逆时针随机）
  */
 function spawnNote() {
-  // 已生成本局全部音符后不再生成
-  if (spawnedCount >= totalNotes) return;
-
   spawnedCount++;
   const type = random(['tap', 'tap', 'tap', 'hold', 'star']);
   const spawnTime = millis();
@@ -260,7 +286,7 @@ function updateNotes() {
   const now = millis();
 
     // 生成：每隔一拍（60000 / BPM 毫秒）生成一个，直到生满 totalNotes
-  if (now >= nextSpawnTime && spawnedCount < totalNotes) {
+  if (now >= nextSpawnTime) {
     spawnNote();
     nextSpawnTime += 60000 / BPM;
   }

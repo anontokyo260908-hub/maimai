@@ -49,7 +49,8 @@ document.getElementById('btn-start').addEventListener('click', () => {
 // 重新开始：回到主菜单
 document.getElementById('btn-restart').addEventListener('click', () => {
   hide('result');
-  show('menu');
+  show('game');
+  startGame(); // 重新开始：直接回到游戏（startGame 会重置全部状态）
 });
 
 
