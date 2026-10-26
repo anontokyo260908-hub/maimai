@@ -10,7 +10,7 @@
 const TAP_COLOR = '#ff3b6b';   // 红：点击音符（--accent）
 const HOLD_COLOR = '#ffd54a';  // 黄：长按音符（--hold）
 const STAR_COLOR = '#ffd54a';  // 黄：星星滑动音符（与 hold 同色，靠形状区分）
-
+const ROTATION_OFFSET = -Math.PI / 8; // 逆时针 30°（即原来顺时针 15°，再逆时针 15°）
 // ---------------------------------------------------------------------------
 // 判定常量
 // ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ function drawCamera() {
 function drawJudgePoints() {
   for (let i = 0; i < 8; i++) {
     // 第 0 个点在正上方，之后顺时针排布（位置公式不变）
-    const angle = i * TWO_PI / 8 - PI / 2;
+    const angle = i * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
     const x = width / 2 + cos(angle) * judgeRadius;
     const y = height / 2 + sin(angle) * judgeRadius;
 
@@ -346,7 +346,7 @@ function drawNotes() {
     }
 
     // tap：从圆心沿指定方向向外移动
-    const ang = n.angle * TWO_PI / 8 - PI / 2;
+    const ang = n.angle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
     const r = n.progress * judgeRadius;
     const x = width / 2 + cos(ang) * r;
     const y = height / 2 + sin(ang) * r;
@@ -366,7 +366,7 @@ function drawNotes() {
  * 先画半透明连接条，再画两端不透明圆环 → 两端实色、中间半透明。
  */
 function drawHoldNote(n) {
-  const ang = n.angle * TWO_PI / 8 - PI / 2;
+  const ang = n.angle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
 
   // 头部半径在外，尾部半径在内（不小于 0）
   const headR = n.progress * judgeRadius;
@@ -415,7 +415,7 @@ function drawStarNote(n) {
   for (let k = 0; k < arrows; k++) {
     const t = (k + 0.5) / arrows;
     const angIndex = startAngle + direction * t;
-    const angRad = angIndex * TWO_PI / 8 - PI / 2;
+    const angRad = angIndex * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
     const x = width / 2 + cos(angRad) * judgeRadius;
     const y = height / 2 + sin(angRad) * judgeRadius;
 
@@ -437,7 +437,7 @@ function drawStarNote(n) {
 
   // ---- 星星本体 ----
   const angIndex = startAngle + direction * n.progress;
-  const angRad = angIndex * TWO_PI / 8 - PI / 2;
+  const angRad = angIndex * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
   const x = width / 2 + cos(angRad) * judgeRadius;
   const y = height / 2 + sin(angRad) * judgeRadius;
 
@@ -515,7 +515,7 @@ function keyPressed() {
  * 判定点坐标（第 i 个判定点，0 号在正上方、顺时针）。
  */
 function judgePointPosition(i) {
-  const ang = i * TWO_PI / 8 - PI / 2;
+  const ang = i * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
   return {
     x: width / 2 + cos(ang) * judgeRadius,
     y: height / 2 + sin(ang) * judgeRadius,
@@ -730,7 +730,7 @@ function updateJudgeHud() {
  * 计算音符目标判定点的坐标（判定圈上的对应角度）。
  */
 function noteTargetPosition(note) {
-  const ang = note.targetAngle * TWO_PI / 8 - PI / 2;
+  const ang = note.targetAngle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
   return {
     x: width / 2 + cos(ang) * judgeRadius,
     y: height / 2 + sin(ang) * judgeRadius,
