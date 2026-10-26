@@ -409,10 +409,10 @@ input[type="range"]::-moz-range-thumb {
   height: 100vh;
 }
 
-/* HUD：固定顶部居中，横向排列 4 列判定成绩 */
+/* HUD：固定底部居中，横向排列 4 列判定成绩 */
 #hud {
   position: fixed;
-  top: 20px;
+  bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;

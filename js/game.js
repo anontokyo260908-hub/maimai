@@ -32,7 +32,8 @@ let notes = [];                     // 存放所有音符
 const BPM = 120;                    // 节拍速度，后续可连设置
 const NOTE_TRAVEL_TIME = 2000;      // tap/hold 从圆心到判定圈的毫秒数
 const STAR_TRAVEL_TIME = 1500;      // star 从一个判定点滑到相邻判定点的毫秒数
-const HOLD_LENGTH = 90;             // 长按胶囊长度（像素；后续可改成按住时长换算）
+const HOLD_LENGTH = 300;            // 长按胶囊长度（像素），决定长按时长：条越长按越久
+const DOUBLE_CHANCE = 0.25;         // 出现「双压」的概率
 let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 millis()）
 
 let judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 }; // 各判定计数
@@ -120,6 +121,9 @@ function updateHands() {
 // 手腕触发判定点的半径与状态
 const TRIGGER_RADIUS = 150; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
 let fistState = {};                 // 每只手(side)当前是否处于「握拳」状态
+let holdTracker = {};               // 每只手(side)正在长按的音符对象
+const FIST_DEBOUNCE = 4;            // 连续多少帧认定手势切换（防识别抖动）
+let fistFrames = {};                // 每只手(side)的连续帧状态 { fist, count }
 
 // ---------------------------------------------------------------------------
 // 尺寸常量（每帧根据画布尺寸重新计算）
@@ -258,8 +262,20 @@ function drawJudgePoints() {
  */
 function spawnNote() {
   spawnedCount++;
-  const type = random(['tap', 'tap', 'tap', 'hold', 'star']);
   const spawnTime = millis();
+
+  // 双压：一定概率生成一对同时到达、落在两个不同判定点的 tap
+  if (random() < DOUBLE_CHANCE) {
+    const a1 = floor(random(8));
+    let a2 = floor(random(8));
+    while (a2 === a1) a2 = floor(random(8)); // 确保两个点不同
+    const hitTime = spawnTime + NOTE_TRAVEL_TIME;
+    notes.push({ type: 'tap', angle: a1, targetAngle: a1, spawnTime: spawnTime, progress: 0, hitTime: hitTime, judged: false, isDouble: true });
+    notes.push({ type: 'tap', angle: a2, targetAngle: a2, spawnTime: spawnTime, progress: 0, hitTime: hitTime, judged: false, isDouble: true });
+    return;
+  }
+
+  const type = random(['tap', 'tap', 'tap', 'hold', 'star']);
 
   if (type === 'star') {
     const startAngle = floor(random(8));       // 起始判定点 0~7
@@ -271,7 +287,6 @@ function spawnNote() {
       direction: direction,
       spawnTime: spawnTime,
       progress: 0,
-      // 目标判定点（滑动到达的那个点）
       targetAngle: (startAngle + direction + 8) % 8,
       hitTime: spawnTime + STAR_TRAVEL_TIME,
       judged: false,
@@ -279,7 +294,7 @@ function spawnNote() {
   } else {
     const angle = floor(random(8)); // 0~7，8 个方向之一
 
-    notes.push({
+    const note = {
       type: type, // 'tap' | 'hold'
       angle: angle,
       targetAngle: angle,
@@ -287,7 +302,15 @@ function spawnNote() {
       progress: 0,
       hitTime: spawnTime + NOTE_TRAVEL_TIME,
       judged: false,
-    });
+    };
+    if (type === 'hold') {
+      // 长按时长 = 条长度 × 音符速度（尾部通过判定点所需的时间）
+      note.holdDuration = HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1);
+      note.holdEndTime = note.hitTime + note.holdDuration;
+      note.holding = false;
+      note.holdGrade = null;
+    }
+    notes.push(note);
   }
 }
 
@@ -301,7 +324,7 @@ function updateNotes() {
     // 生成：每隔一拍（60000 / BPM 毫秒）生成一个，直到生满 totalNotes
   if (now >= nextSpawnTime) {
     spawnNote();
-    nextSpawnTime += 60000 / BPM;
+    nextSpawnTime += 2 * 60000 / BPM; // 每 2 拍生成一个（测试期降低密度）
   }
 
   // 更新 / 移除：倒序便于 splice
@@ -310,15 +333,9 @@ function updateNotes() {
     const travel = n.type === 'star' ? STAR_TRAVEL_TIME : NOTE_TRAVEL_TIME;
     const progress = (now - n.spawnTime) / travel;
 
-    // 自动 miss：超过 good 判定窗仍未判定
-    if (!n.judged && now > n.hitTime + JUDGE_WINDOWS.good) {
-      judgeCounts.miss++;
-      updateJudgeHud();
-      playJudgeSound('miss');
-      spawnMissEffect(n); // 淡蓝圆环
-      combo = 0;          // 断连击
-      updateCombo();
-      notes.splice(i, 1);
+    // 自动 miss：头部过了 good 判定窗仍未判定（且不是在长按中）
+    if (!n.judged && !n.holding && now > n.hitTime + JUDGE_WINDOWS.good) {
+      applyMiss(n);
       continue;
     }
 
@@ -345,16 +362,15 @@ function drawNotes() {
       continue;
     }
 
-    // tap：从圆心沿指定方向向外移动
+    // tap：从圆心沿指定方向向外移动（双压时变黄提示）
     const ang = n.angle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
     const r = n.progress * judgeRadius;
     const x = width / 2 + cos(ang) * r;
     const y = height / 2 + sin(ang) * r;
 
     push();
-    // 红色空心圆环：线宽 6px，直径 34px
     noFill();
-    stroke(TAP_COLOR); // 红 #ff3b6b
+    stroke(n.isDouble ? HOLD_COLOR : TAP_COLOR); // 双压黄、普通红
     strokeWeight(6);
     circle(x, y, 34);
     pop();
@@ -368,9 +384,15 @@ function drawNotes() {
 function drawHoldNote(n) {
   const ang = n.angle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
 
-  // 头部半径在外，尾部半径在内（不小于 0）
+  // 头部半径在外
   const headR = n.progress * judgeRadius;
-  const tailR = max(0, headR - HOLD_LENGTH);
+
+  // 尾部：正在长按时，尾部随剩余时间向头部收缩（视觉提示还要按多久）
+  let tailR = max(0, headR - HOLD_LENGTH);
+  if (n.holding) {
+    const remaining = constrain((n.holdEndTime - millis()) / n.holdDuration, 0, 1);
+    tailR = headR - HOLD_LENGTH * remaining;
+  }
 
   const headX = width / 2 + cos(ang) * headR;
   const headY = height / 2 + sin(ang) * headR;
@@ -390,7 +412,7 @@ function drawHoldNote(n) {
   stroke(HOLD_COLOR); // 黄 #ffd54a
   strokeWeight(6);
   circle(headX, headY, 34);
-  circle(tailX, tailY, 34);
+  if (tailR > 0) circle(tailX, tailY, 34); // 尾部收缩到头部后不再画尾部圆环
 
   pop();
 }
@@ -502,6 +524,23 @@ function playJudgeSound(type) {
  * 键盘输入（调试备用）：按 1~8 键模拟 8 个判定点。
  * 正式输入由摄像头手势识别（checkHandHits）提供，此处保留便于无摄像头时测试。
  */
+/**
+ * 测试用：生成一个指定类型的音符（随机方向）。
+ */
+function spawnOne(type) {
+  const spawnTime = millis();
+  if (type === 'star') {
+    const startAngle = floor(random(8));
+    const direction = random() < 0.5 ? 1 : -1;
+    notes.push({ type: 'star', startAngle: startAngle, direction: direction, spawnTime: spawnTime, progress: 0, targetAngle: (startAngle + direction + 8) % 8, hitTime: spawnTime + STAR_TRAVEL_TIME, judged: false });
+  } else {
+    const angle = floor(random(8));
+    const note = { type: type, angle: angle, targetAngle: angle, spawnTime: spawnTime, progress: 0, hitTime: spawnTime + NOTE_TRAVEL_TIME, judged: false };
+    if (type === 'hold') { note.holdDuration = HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1); note.holdEndTime = note.hitTime + note.holdDuration; note.holding = false; note.holdGrade = null; }
+    notes.push(note);
+  }
+}
+
 function keyPressed() {
   if (!gameStarted) return;
 
@@ -509,6 +548,11 @@ function keyPressed() {
     const angleIndex = int(key) - 1; // '1' → 0 … '8' → 7
     hitJudge(angleIndex);
   }
+
+  // 测试用：按 t/h/s 生成单个音符，方便逐类测试识别
+  if (key === 't' || key === 'T') spawnOne('tap');
+  if (key === 'h' || key === 'H') spawnOne('hold');
+  if (key === 's' || key === 'S') spawnOne('star');
 }
 
 /**
@@ -574,67 +618,113 @@ function drawDebug() {
  * 只有「从张开变成握拳」的瞬间才触发一次，持续握拳不会重复触发。
  */
 function checkHandHits() {
+  const activeSides = new Set();
+
+  // 1) 每只手的手势变化：带防抖，避免识别抖动导致长按误断
   for (const hand of hands) {
-    // 是否握拳（模型识别为 Closed_Fist，且把握度 >= 0.6）
+    activeSides.add(hand.side);
     const isFist = hand.gesture === 'Closed_Fist' && hand.score >= 0.6;
-    const wasFist = !!fistState[hand.side];
-    fistState[hand.side] = isFist;
 
-    // 刚从「非握拳」变「握拳」→ 触发命中
-    if (!isFist || wasFist) continue;
-
-    const w = hand.points[0]; // 手腕
-
-    // 找离手腕最近的判定点
-    let idx = -1;
-    let bestDist = Infinity;
-    for (let i = 0; i < 8; i++) {
-      const pos = judgePointPosition(i);
-      const d = dist(w.x, w.y, pos.x, pos.y);
-      if (d < bestDist) {
-        bestDist = d;
-        idx = i;
-      }
+    // 连续帧计数，状态稳定 FIST_DEBOUNCE 帧后才认定切换
+    let f = fistFrames[hand.side];
+    if (!f || f.fist !== isFist) {
+      f = { fist: isFist, count: 1 };
+    } else {
+      f.count = Math.min(f.count + 1, FIST_DEBOUNCE);
     }
+    fistFrames[hand.side] = f;
 
-    if (bestDist < TRIGGER_RADIUS && idx !== -1) hitJudge(idx);
+    if (f.count < FIST_DEBOUNCE) continue; // 还没稳定，先不改状态
+
+    const wasFist = !!fistState[hand.side];
+    if (isFist && !wasFist) {
+      graspStart(hand);                       // 刚握拳 → 命中或开始长按
+    } else if (!isFist && wasFist) {
+      if (holdTracker[hand.side]) breakHold(hand.side); // 松开 → 长按中断
+    }
+    fistState[hand.side] = isFist;
+  }
+
+  // 清理已离开画面的手的状态
+  for (const side in fistState) {
+    if (!activeSides.has(side)) { delete fistState[side]; delete fistFrames[side]; }
+  }
+
+  // 2) 手离开画面 → 对应长按中断
+  for (const side in holdTracker) {
+    if (!activeSides.has(side)) breakHold(side);
+  }
+
+  // 3) 长按到点 → 完成结算
+  for (const side in holdTracker) {
+    if (millis() >= holdTracker[side].holdEndTime) completeHold(side);
   }
 }
 
 /**
- * 判定核心：在指定角度索引上寻找最接近判定时刻的未判定音符。
- * 没找到（空打）则什么都不做，不产生 miss。
+ * 刚握拳：找离手腕最近的判定点，命中 tap/star 或开始 hold 长按。
  */
-function hitJudge(angleIndex) {
+function graspStart(hand) {
+  const w = hand.points[0];
+
+  let idx = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < 8; i++) {
+    const pos = judgePointPosition(i);
+    const d = dist(w.x, w.y, pos.x, pos.y);
+    if (d < bestDist) { bestDist = d; idx = i; }
+  }
+  if (bestDist >= TRIGGER_RADIUS || idx === -1) return;
+
+  const t = findJudgeTarget(idx);
+  if (!t) return;
+
+  if (t.note.type === 'hold') {
+    startHold(t.note, t.grade, hand.side);
+  } else {
+    applyJudge(t.note, t.grade);
+  }
+}
+
+/**
+ * 找最接近判定时刻、且未被判定/未被长按占用的音符，返回 { note, grade } 或 null。
+ */
+function findJudgeTarget(angleIndex) {
   const now = millis();
   let best = null;
   let bestDiff = Infinity;
 
   for (const n of notes) {
-    if (n.judged) continue;
+    if (n.judged || n.holding) continue;
     if (n.targetAngle !== angleIndex) continue;
 
     const diff = abs(now - n.hitTime);
     if (diff > JUDGE_WINDOWS.good) continue;
 
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = n;
-    }
+    if (diff < bestDiff) { bestDiff = diff; best = n; }
   }
 
-  if (!best) return; // 空打不判
+  if (!best) return null; // 空打
 
-  let type;
-  if (bestDiff <= JUDGE_WINDOWS.perfect) type = 'perfect';
-  else if (bestDiff <= JUDGE_WINDOWS.great) type = 'great';
-  else type = 'good';
+  let grade;
+  if (bestDiff <= JUDGE_WINDOWS.perfect) grade = 'perfect';
+  else if (bestDiff <= JUDGE_WINDOWS.great) grade = 'great';
+  else grade = 'good';
 
-  applyJudge(best, type);
+  return { note: best, grade: grade };
 }
 
 /**
- * 应用判定结果：标记已判定、累加计数、更新 HUD、播放音效、生成特效、移除音符。
+ * 键盘输入用（调试备用）：找到目标就直接判定；长按也直接完成（不做持续抓握）。
+ */
+function hitJudge(angleIndex) {
+  const t = findJudgeTarget(angleIndex);
+  if (!t) return;
+  applyJudge(t.note, t.grade);
+}
+
+/**
+ * 应用判定结果（perfect/great/good）：计数、计分、连击、音效、特效、移除。
  */
 function applyJudge(note, type) {
   note.judged = true;
@@ -642,19 +732,62 @@ function applyJudge(note, type) {
   updateJudgeHud();
   playJudgeSound(type);
 
-  // 计分与连击（miss 走自动 miss 分支，不经过这里）
   score += SCORE_TABLE[type];
   combo++;
   maxCombo = max(maxCombo, combo);
   updateScore();
   updateCombo();
 
-  // 命中特效：在目标判定点散落星星粒子
   const pos = noteTargetPosition(note);
   spawnHitEffect(pos.x, pos.y, JUDGE_COLORS[type]);
 
   const idx = notes.indexOf(note);
   if (idx !== -1) notes.splice(idx, 1);
+}
+
+/**
+ * miss 处理（漏判 / 长按中途松开）：计数、断连击、miss 音效与特效、移除。
+ */
+function applyMiss(note) {
+  note.judged = true;
+  judgeCounts.miss++;
+  updateJudgeHud();
+  playJudgeSound('miss');
+  spawnMissEffect(note);
+  combo = 0;
+  updateCombo();
+
+  const idx = notes.indexOf(note);
+  if (idx !== -1) notes.splice(idx, 1);
+}
+
+/**
+ * 开始长按：标记音符正在被按住，记录初始握拳等级与是哪只手。
+ */
+function startHold(note, grade, side) {
+  note.holding = true;
+  note.holdGrade = grade;
+  holdTracker[side] = note;
+}
+
+/**
+ * 长按完成：持续握拳到 holdEndTime，按初始等级结算。
+ */
+function completeHold(side) {
+  const note = holdTracker[side];
+  if (!note) return;
+  delete holdTracker[side];
+  applyJudge(note, note.holdGrade);
+}
+
+/**
+ * 长按中断：中途松开/手消失，记为 miss。
+ */
+function breakHold(side) {
+  const note = holdTracker[side];
+  if (!note) return;
+  delete holdTracker[side];
+  applyMiss(note);
 }
 
 /**
@@ -886,6 +1019,8 @@ function startGame() {
 
   // 手势状态重置
   fistState = {};
+  holdTracker = {};
+  fistFrames = {};
 
   // 解锁浏览器音频（必须由用户手势触发）
   if (typeof userStartAudio === 'function') userStartAudio();
