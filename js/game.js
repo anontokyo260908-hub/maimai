@@ -48,6 +48,8 @@ const HOLD_TICK_INTERVAL = 50;     // 长按「嗒」声重复间隔（毫秒）
 let lastHoldTick = 0;               // 上次播放长按「嗒」声的时间
 const TICK_BASE_FREQ = 5000;        // 长按「嗒」声基准频率
 const TICK_VARIATION = 150;         // 每次随机上下浮动（Hz），让「嗒」声有细微音高变化
+let song = null;                    // 背景歌曲
+let songStarted = false;            // 歌曲是否已开始播放
 
 // 分数与连击
 let score = 0;
@@ -145,6 +147,10 @@ let cameraAlpha = 255; // 摄像头背景透明度（0~255），默认完全显�
 // ---------------------------------------------------------------------------
 // p5 生命周期
 // ---------------------------------------------------------------------------
+function preload() {
+  song = loadSound('assets/songs/song.mp3');
+}
+
 function setup() {
   createCanvas(windowWidth, windowHeight).parent('game');
   initSounds();
@@ -200,7 +206,10 @@ function draw() {
         '检测到手数=', hands.length);
     }
 
-    // （结算条件已移除：等导入歌曲后，改成「歌曲播放完 → 结算」）
+    // 歌曲播放完 → 结算
+    if (!gameEnded && song && songStarted && song.currentTime() > 0.5 && !song.isPlaying()) {
+      endGame();
+    }
 }
 
 /** 窗口缩放：让画布跟随视口尺寸 */
@@ -1184,6 +1193,13 @@ function startGame() {
   // 解锁浏览器音频（必须由用户手势触发）
   if (typeof userStartAudio === 'function') userStartAudio();
   initSounds();
+
+  // 播放歌曲（从头开始）
+  if (song && song.isLoaded()) {
+    song.stop();
+    song.play();
+    songStarted = true;
+  }
 }
 
 // ---------------------------------------------------------------------------
