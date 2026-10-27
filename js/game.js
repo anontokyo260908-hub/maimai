@@ -10,11 +10,12 @@
 const TAP_COLOR = '#ff3b6b';   // 红：点击音符（--accent）
 const HOLD_COLOR = '#ffd54a';  // 黄：长按音符（--hold）
 const STAR_COLOR = '#ffd54a';  // 黄：星星滑动音符（与 hold 同色，靠形状区分）
+const HOLD_GRAY = '#8a90a0';   // 灰：长按没接住时的颜色
 const ROTATION_OFFSET = -Math.PI / 8; // 逆时针 30°（即原来顺时针 15°，再逆时针 15°）
 // ---------------------------------------------------------------------------
 // 判定常量
 // ---------------------------------------------------------------------------
-const JUDGE_WINDOWS = { perfect: 60, great: 120, good: 180 }; // 判定时间窗(ms)
+const JUDGE_WINDOWS = { perfect: 100, great: 200, good: 320 }; // 判定时间窗(ms)，整体放宽
 const JUDGE_COLORS = {
   perfect: '#ff3b6b', // 红
   great: '#ffd54a',   // 黄
@@ -33,6 +34,7 @@ const BPM = 120;                    // 节拍速度，后续可连设置
 const NOTE_TRAVEL_TIME = 2000;      // tap/hold 从圆心到判定圈的毫秒数
 const STAR_TRAVEL_TIME = 1500;      // star 从一个判定点滑到相邻判定点的毫秒数
 const HOLD_LENGTH = 300;            // 长按胶囊长度（像素），决定长按时长：条越长按越久
+const HOLD_GRACE = 3000;            // 长按没接住后变灰，最多等这么久补抓（毫秒）
 const DOUBLE_CHANCE = 0.25;         // 出现「双压」的概率
 let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 millis()）
 
@@ -120,8 +122,9 @@ function updateHands() {
 }
 
 // 手腕触发判定点的半径与状态
-const TRIGGER_RADIUS = 175; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
+const TRIGGER_RADIUS = 165; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
 const PINCH_RATIO = 0.4;     // 捏合判定阈值：拇指-食指距离 / 手大小，小于此值算「捏合」
+const RELEASE_RATIO = 0.8;   // 松开判定阈值：大于此值才算「完全张开」（长按才松手）
 let fistState = {};                 // 每只手(side)当前是否处于「握拳」状态
 let holdTracker = {};               // 每只手(side)正在长按的音符对象
 const FIST_DEBOUNCE = 3;            // 连续多少帧认定手势切换（越小越灵敏，但太小说不定会抖动）
@@ -132,6 +135,7 @@ let fistFrames = {};                // 每只手(side)的连续帧状态 { fist,
 // ---------------------------------------------------------------------------
 let discRadius;   // 中心圆盘半径 = min(width, height) * 0.30
 let judgeRadius;  // 判定圈半径 = min(width, height) * 0.38（8 个点所在的圈，比圆盘略外）
+let centerX, centerY; // 圆盘中心（centerY 下移，让顶部判定点更容易够到）
 let cameraAlpha = 255; // 摄像头背景透明度（0~255），默认完全显示
 // ---------------------------------------------------------------------------
 // p5 生命周期
@@ -145,6 +149,8 @@ function draw() {
   background(11, 11, 20); // --bg #0b0b14
   discRadius = min(width, height) * 0.30;
   judgeRadius = min(width, height) * 0.38;
+  centerX = width * 0.5;      // 水平居中
+  centerY = height * 0.55;    // 垂直方向下移，让顶部判定点更好够
 
     if (!gameStarted) return; // 未开始时只留背景
 
@@ -204,7 +210,7 @@ function yellow75() {
 // ---------------------------------------------------------------------------
 function drawDisc() {
   push();
-  translate(width / 2, height / 2); // 圆心对齐到画面中心
+  translate(centerX, centerY); // 圆心对齐到画面中心
 
   // 大圆盘描边（青色 --cyan #00d4ff）
   noFill();
@@ -240,8 +246,8 @@ function drawJudgePoints() {
   for (let i = 0; i < 8; i++) {
     // 第 0 个点在正上方，之后顺时针排布（位置公式不变）
     const angle = i * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
-    const x = width / 2 + cos(angle) * judgeRadius;
-    const y = height / 2 + sin(angle) * judgeRadius;
+    const x = centerX + cos(angle) * judgeRadius;
+    const y = centerY + sin(angle) * judgeRadius;
 
     push();
 
@@ -312,6 +318,7 @@ function spawnNote() {
       note.holdDuration = HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1);
       note.holdEndTime = note.hitTime + note.holdDuration;
       note.holding = false;
+      note.grayed = false;
       note.holdGrade = null;
     }
     notes.push(note);
@@ -337,8 +344,20 @@ function updateNotes() {
     const travel = n.type === 'star' ? STAR_TRAVEL_TIME : NOTE_TRAVEL_TIME;
     const progress = (now - n.spawnTime) / travel;
 
-    // 自动 miss：头部过了 good 判定窗仍未判定（且不是在长按中）
-    if (!n.judged && !n.holding && now > n.hitTime + JUDGE_WINDOWS.good) {
+    // 自动 miss 与长按变灰逻辑
+    const missed = now > n.hitTime + JUDGE_WINDOWS.good;
+
+    if (n.type === 'hold' && !n.judged && !n.holding) {
+      // 长按：头部过了 good 窗还没被接住 → 变灰；灰色太久还没补抓 → miss
+      if (!n.grayed && missed) {
+        n.grayed = true;
+        n.grayTime = now;
+      } else if (n.grayed && now > n.grayTime + HOLD_GRACE) {
+        applyMiss(n);
+        continue;
+      }
+    } else if (!n.judged && !n.holding && missed) {
+      // tap/star：过了 good 窗未判 → miss
       applyMiss(n);
       continue;
     }
@@ -369,8 +388,8 @@ function drawNotes() {
     // tap：从圆心沿指定方向向外移动（双压时变黄提示）
     const ang = n.angle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
     const r = n.progress * judgeRadius;
-    const x = width / 2 + cos(ang) * r;
-    const y = height / 2 + sin(ang) * r;
+    const x = centerX + cos(ang) * r;
+    const y = centerY + sin(ang) * r;
 
     push();
     noFill();
@@ -391,29 +410,35 @@ function drawHoldNote(n) {
   // 头部半径在外
   const headR = n.progress * judgeRadius;
 
-  // 尾部：正在长按时，尾部随剩余时间向头部收缩（视觉提示还要按多久）
+  // 尾部：正在长按时随剩余时间收缩；灰色（补抓中）时冻结在松开时的长度
   let tailR = max(0, headR - HOLD_LENGTH);
   if (n.holding) {
     const remaining = constrain((n.holdEndTime - millis()) / n.holdDuration, 0, 1);
     tailR = headR - HOLD_LENGTH * remaining;
+  } else if (n.grayed && n.holdRemaining !== undefined) {
+    tailR = headR - HOLD_LENGTH * n.holdRemaining;
   }
 
-  const headX = width / 2 + cos(ang) * headR;
-  const headY = height / 2 + sin(ang) * headR;
-  const tailX = width / 2 + cos(ang) * tailR;
-  const tailY = height / 2 + sin(ang) * tailR;
+  const headX = centerX + cos(ang) * headR;
+  const headY = centerY + sin(ang) * headR;
+  const tailX = centerX + cos(ang) * tailR;
+  const tailY = centerY + sin(ang) * tailR;
 
   push();
 
-  // 1) 中间连接：75% 黄色粗条连接两个圆心
+  const barCol = color(n.grayed ? HOLD_GRAY : HOLD_COLOR);
+  barCol.setAlpha(191); // 中间连接 75% 透明度
+  const ringCol = color(n.grayed ? HOLD_GRAY : HOLD_COLOR);
+
+  // 1) 中间连接：75% 半透明粗条连接两个圆心
   strokeCap(ROUND);
-  stroke(yellow75()); // 黄 75%（alpha 191）
+  stroke(barCol);
   strokeWeight(24);
   line(tailX, tailY, headX, headY);
 
-  // 2) 两端：不透明黄色中空圆环（直径 34px、线宽 6px，与 tap 同尺寸）
+  // 2) 两端：不透明中空圆环（直径 34px、线宽 6px，与 tap 同尺寸）
   noFill();
-  stroke(HOLD_COLOR); // 黄 #ffd54a
+  stroke(ringCol);
   strokeWeight(6);
   circle(headX, headY, 34);
   if (tailR > 0) circle(tailX, tailY, 34); // 尾部收缩到头部后不再画尾部圆环
@@ -442,8 +467,8 @@ function drawStarNote(n) {
     const t = (k + 0.5) / arrows;
     const angIndex = startAngle + direction * t;
     const angRad = angIndex * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
-    const x = width / 2 + cos(angRad) * judgeRadius;
-    const y = height / 2 + sin(angRad) * judgeRadius;
+    const x = centerX + cos(angRad) * judgeRadius;
+    const y = centerY + sin(angRad) * judgeRadius;
 
     // 切线方向（沿圆弧的移动方向）
     const tangent = angRad + (direction > 0 ? HALF_PI : -HALF_PI);
@@ -464,8 +489,8 @@ function drawStarNote(n) {
   // ---- 星星本体 ----
   const angIndex = startAngle + direction * n.progress;
   const angRad = angIndex * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
-  const x = width / 2 + cos(angRad) * judgeRadius;
-  const y = height / 2 + sin(angRad) * judgeRadius;
+  const x = centerX + cos(angRad) * judgeRadius;
+  const y = centerY + sin(angRad) * judgeRadius;
 
   drawStar(x, y, 26, 11);
 }
@@ -540,7 +565,7 @@ function spawnOne(type) {
   } else {
     const angle = floor(random(8));
     const note = { type: type, angle: angle, targetAngle: angle, spawnTime: spawnTime, progress: 0, hitTime: spawnTime + NOTE_TRAVEL_TIME, judged: false };
-    if (type === 'hold') { note.holdDuration = HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1); note.holdEndTime = note.hitTime + note.holdDuration; note.holding = false; note.holdGrade = null; }
+    if (type === 'hold') { note.holdDuration = HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1); note.holdEndTime = note.hitTime + note.holdDuration; note.holding = false; note.grayed = false; note.holdGrade = null; }
     notes.push(note);
   }
 }
@@ -565,8 +590,8 @@ function keyPressed() {
 function judgePointPosition(i) {
   const ang = i * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
   return {
-    x: width / 2 + cos(ang) * judgeRadius,
-    y: height / 2 + sin(ang) * judgeRadius,
+    x: centerX + cos(ang) * judgeRadius,
+    y: centerY + sin(ang) * judgeRadius,
   };
 }
 
@@ -629,31 +654,40 @@ function drawDebug() {
  * 只有「从张开变成握拳」的瞬间才触发一次，持续握拳不会重复触发。
  */
 /**
- * 捏合判定：用「拇指尖(4) ↔ 食指尖(8)」的距离，除以「手腕(0) ↔ 中指指尖(12)」
- * 的距离（手的大小基准）。比例小于 PINCH_RATIO 视为「手指合拢（捏合）」。
+ * 计算捏合比：拇指尖(4)↔食指尖(8)距离 ÷ 手腕(0)↔中指指尖(12)距离。
+ * 手不可用（太小/不可见）时返回 null。
  */
-function isPinching(hand) {
+function pinchRatio(hand) {
   const wrist = hand.points[0];
   const thumbTip = hand.points[4];
   const indexTip = hand.points[8];
   const middleTip = hand.points[12];
 
   const handScale = dist(wrist.x, wrist.y, middleTip.x, middleTip.y);
-  if (handScale < 1) return false;
+  if (handScale < 1) return null;
 
   const pinch = dist(thumbTip.x, thumbTip.y, indexTip.x, indexTip.y);
-  return (pinch / handScale) < PINCH_RATIO;
+  return pinch / handScale;
+}
+
+/**
+ * 是否处于「捏合」状态（比例小于 PINCH_RATIO）。
+ */
+function isPinching(hand) {
+  const r = pinchRatio(hand);
+  return r !== null && r < PINCH_RATIO;
 }
 
 function checkHandHits() {
   const activeSides = new Set();
 
-  // 1) 每只手的手势变化：带防抖，避免识别抖动导致长按误断
+  // 1) 每只手：抓握开始（带防抖）+ 长按的松开检测
   for (const hand of hands) {
     activeSides.add(hand.side);
-    const isFist = isPinching(hand);
+    const ratio = pinchRatio(hand);
+    const isFist = ratio !== null && ratio < PINCH_RATIO;
 
-    // 连续帧计数，状态稳定 FIST_DEBOUNCE 帧后才认定切换
+    // 抓握状态防抖
     let f = fistFrames[hand.side];
     if (!f || f.fist !== isFist) {
       f = { fist: isFist, count: 1 };
@@ -662,15 +696,18 @@ function checkHandHits() {
     }
     fistFrames[hand.side] = f;
 
-    if (f.count < FIST_DEBOUNCE) continue; // 还没稳定，先不改状态
-
-    const wasFist = !!fistState[hand.side];
-    if (isFist && !wasFist) {
-      graspStart(hand);                       // 刚握拳 → 命中或开始长按
-    } else if (!isFist && wasFist) {
-      if (holdTracker[hand.side]) breakHold(hand.side); // 松开 → 长按中断
+    if (f.count >= FIST_DEBOUNCE) {
+      const wasFist = !!fistState[hand.side];
+      if (isFist && !wasFist) {
+        graspStart(hand);                       // 抓握 → 命中或开始长按
+      }
+      fistState[hand.side] = isFist;
     }
-    fistState[hand.side] = isFist;
+
+    // 长按中：只有接近完全张开（ratio > RELEASE_RATIO）才算松开 → 变灰
+    if (holdTracker[hand.side] && ratio !== null && ratio > RELEASE_RATIO) {
+      breakHold(hand.side);
+    }
   }
 
   // 清理已离开画面的手的状态
@@ -678,7 +715,7 @@ function checkHandHits() {
     if (!activeSides.has(side)) { delete fistState[side]; delete fistFrames[side]; }
   }
 
-  // 2) 手离开画面 → 对应长按中断
+  // 2) 手离开画面 → 对应长按变灰
   for (const side in holdTracker) {
     if (!activeSides.has(side)) breakHold(side);
   }
@@ -706,6 +743,12 @@ function graspStart(hand) {
 
   const t = findJudgeTarget(idx);
   if (!t) {
+    // 尝试补抓灰色长按
+    const gh = findGrayHold(idx);
+    if (gh) {
+      startHold(gh, 'good', hand.side);
+      return;
+    }
     // 空判：此处没有可判定的音符，生成黄色波纹特效
     const pos = judgePointPosition(idx);
     spawnEmptyEffect(pos.x, pos.y);
@@ -795,11 +838,25 @@ function applyMiss(note) {
 }
 
 /**
+ * 找灰色（没被接住）的长按音符，用于补抓。
+ */
+function findGrayHold(angleIndex) {
+  for (const n of notes) {
+    if (n.type !== 'hold' || !n.grayed || n.judged || n.holding) continue;
+    if (n.targetAngle !== angleIndex) continue;
+    return n;
+  }
+  return null;
+}
+
+/**
  * 开始长按：标记音符正在被按住，记录初始握拳等级与是哪只手。
  */
 function startHold(note, grade, side) {
   note.holding = true;
+  note.grayed = false;   // 补抓成功，变回黄色
   note.holdGrade = grade;
+  note.holdEndTime = millis() + note.holdDuration; // 从现在重新计时
   holdTracker[side] = note;
 }
 
@@ -820,7 +877,12 @@ function breakHold(side) {
   const note = holdTracker[side];
   if (!note) return;
   delete holdTracker[side];
-  applyMiss(note);
+  // 松开 → 变灰，并冻结当前进度（条不再变回全长）
+  note.holdRemaining = constrain((note.holdEndTime - millis()) / note.holdDuration, 0, 1);
+  note.holding = false;
+  note.grayed = true;
+  note.grayTime = millis();
+  note.holdGrade = null;
 }
 
 /**
@@ -898,8 +960,8 @@ function updateJudgeHud() {
 function noteTargetPosition(note) {
   const ang = note.targetAngle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
   return {
-    x: width / 2 + cos(ang) * judgeRadius,
-    y: height / 2 + sin(ang) * judgeRadius,
+    x: centerX + cos(ang) * judgeRadius,
+    y: centerY + sin(ang) * judgeRadius,
   };
 }
 
