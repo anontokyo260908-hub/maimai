@@ -31,10 +31,10 @@ let paused = false;
 
 let notes = [];                     // 存放所有音符
 const BPM = 120;                    // 节拍速度，后续可连设置
+const STARTUP_DELAY = 4 * 60000 / BPM; // 开局 4 拍倒计时后再出音符（也等手势模型就绪）
 const NOTE_TRAVEL_TIME = 2000;      // tap/hold 从圆心到判定圈的毫秒数
 const STAR_TRAVEL_TIME = 1500;      // star 从一个判定点滑到相邻判定点的毫秒数
 const HOLD_LENGTH = 300;            // 长按胶囊长度（像素），决定长按时长：条越长按越久
-const HOLD_GRACE = 3000;            // 长按没接住后变灰，最多等这么久补抓（毫秒）
 const DOUBLE_CHANCE = 0.25;         // 出现「双压」的概率
 let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 millis()）
 
@@ -42,7 +42,12 @@ let judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 }; // 各判定计数
 let particles = [];                 // 命中星星散落粒子 {x,y,vx,vy,angle,spin,size,color,start}
 let missEffects = [];               // miss 淡蓝圆环 {x, y, start}
 let emptyEffects = [];              // 空判黄色波纹 {x, y, start}
-let judgeOsc, judgeEnv;             // 判定音效（振荡器 + 包络）
+let judgeOsc, judgeEnv;             // 判定音效
+let tickOsc, tickEnv;               // 长按开始的短促「嗒」声（音量独立）
+const HOLD_TICK_INTERVAL = 50;     // 长按「嗒」声重复间隔（毫秒）
+let lastHoldTick = 0;               // 上次播放长按「嗒」声的时间
+const TICK_BASE_FREQ = 5000;        // 长按「嗒」声基准频率
+const TICK_VARIATION = 150;         // 每次随机上下浮动（Hz），让「嗒」声有细微音高变化
 
 // 分数与连击
 let score = 0;
@@ -178,6 +183,13 @@ function draw() {
     updateHands();
     drawHover();
     checkHandHits();
+
+    // 长按期间持续「嗒」声（每 HOLD_TICK_INTERVAL 响一下）
+    if (Object.keys(holdTracker).length > 0 && millis() - lastHoldTick > HOLD_TICK_INTERVAL) {
+      lastHoldTick = millis();
+      playHoldTick();
+    }
+
     drawDebug(); // 调试：触发范围 + 手势名 + 把握度（正式版可移除）
 
     // 调试：每 2 秒输出一次手势状态
@@ -344,20 +356,25 @@ function updateNotes() {
     const travel = n.type === 'star' ? STAR_TRAVEL_TIME : NOTE_TRAVEL_TIME;
     const progress = (now - n.spawnTime) / travel;
 
-    // 自动 miss 与长按变灰逻辑
-    const missed = now > n.hitTime + JUDGE_WINDOWS.good;
-
-    if (n.type === 'hold' && !n.judged && !n.holding) {
-      // 长按：头部过了 good 窗还没被接住 → 变灰；灰色太久还没补抓 → miss
-      if (!n.grayed && missed) {
-        n.grayed = true;
-        n.grayTime = now;
-      } else if (n.grayed && now > n.grayTime + HOLD_GRACE) {
-        applyMiss(n);
+    // 长按：整条持续向外移动，尾部通过判定点(holdEndTime)时结束
+    if (n.type === 'hold') {
+      if (n.holding) {
+        n.progress = progress; // 正在长按，条继续走
         continue;
       }
-    } else if (!n.judged && !n.holding && missed) {
-      // tap/star：过了 good 窗未判 → miss
+      if (now > n.holdEndTime) {
+        applyMiss(n);          // 尾部已通过还没完成 → miss
+        continue;
+      }
+      if (!n.grayed && now > n.hitTime + JUDGE_WINDOWS.good) {
+        n.grayed = true;       // 头部过了 good 窗没被接住 → 变灰
+      }
+      n.progress = progress;   // 灰色期间条继续走，等待补抓
+      continue;
+    }
+
+    // tap/star：头部过了 good 窗未判 → miss
+    if (!n.judged && now > n.hitTime + JUDGE_WINDOWS.good) {
       applyMiss(n);
       continue;
     }
@@ -407,17 +424,9 @@ function drawNotes() {
 function drawHoldNote(n) {
   const ang = n.angle * TWO_PI / 8 - PI / 2 + ROTATION_OFFSET;
 
-  // 头部半径在外
+  // 头部持续向外走，尾部保持固定间距跟在后面
   const headR = n.progress * judgeRadius;
-
-  // 尾部：正在长按时随剩余时间收缩；灰色（补抓中）时冻结在松开时的长度
-  let tailR = max(0, headR - HOLD_LENGTH);
-  if (n.holding) {
-    const remaining = constrain((n.holdEndTime - millis()) / n.holdDuration, 0, 1);
-    tailR = headR - HOLD_LENGTH * remaining;
-  } else if (n.grayed && n.holdRemaining !== undefined) {
-    tailR = headR - HOLD_LENGTH * n.holdRemaining;
-  }
+  const tailR = max(0, headR - HOLD_LENGTH);
 
   const headX = centerX + cos(ang) * headR;
   const headY = centerY + sin(ang) * headR;
@@ -536,6 +545,26 @@ function initSounds() {
   judgeEnv = new p5.Envelope();
   judgeEnv.setADSR(0.001, 0.12, 0, 0.05);
   judgeEnv.setRange(0.4, 0);
+
+  // 长按开始的短促「嗒」声（类似按键/翻页的清脆效果音）
+  tickOsc = new p5.Oscillator('triangle');
+  tickOsc.freq(TICK_BASE_FREQ);
+  tickOsc.start();
+  tickOsc.amp(0);
+
+  tickEnv = new p5.Envelope();
+  tickEnv.setADSR(0.001, 0.05, 0, 0.02);
+  tickEnv.setRange(0.2, 0);
+}
+
+/**
+ * 根据当前是否有长按在按住，控制持续音的开/关（平滑淡入淡出）。
+ */
+function playHoldTick() {
+  if (!tickOsc || !tickEnv) return;
+  // 每次在基准频率附近随机，让「嗒」声有细微音高变化
+  tickOsc.freq(TICK_BASE_FREQ + random(-TICK_VARIATION, TICK_VARIATION));
+  tickEnv.play(tickOsc);
 }
 
 /**
@@ -856,8 +885,7 @@ function startHold(note, grade, side) {
   note.holding = true;
   note.grayed = false;   // 补抓成功，变回黄色
   note.holdGrade = grade;
-  note.holdEndTime = millis() + note.holdDuration; // 从现在重新计时
-  holdTracker[side] = note;
+  holdTracker[side] = note;  // holdEndTime 固定，到点自动完成
 }
 
 /**
@@ -877,11 +905,9 @@ function breakHold(side) {
   const note = holdTracker[side];
   if (!note) return;
   delete holdTracker[side];
-  // 松开 → 变灰，并冻结当前进度（条不再变回全长）
-  note.holdRemaining = constrain((note.holdEndTime - millis()) / note.holdDuration, 0, 1);
+  // 松开 → 变灰，条继续走（可补抓）
   note.holding = false;
   note.grayed = true;
-  note.grayTime = millis();
   note.holdGrade = null;
 }
 
@@ -1135,7 +1161,7 @@ function startGame() {
   missEffects = [];
   emptyEffects = [];
   spawnedCount = 0;
-  nextSpawnTime = millis();
+  nextSpawnTime = millis() + STARTUP_DELAY;
 
     // 界面归零
   updateScore();
