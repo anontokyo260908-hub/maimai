@@ -36,6 +36,7 @@ const NOTE_TRAVEL_TIME = 2000;      // tap/hold 从圆心到判定圈的毫秒�
 const STAR_TRAVEL_TIME = 1500;      // star 从一个判定点滑到相邻判定点的毫秒数
 const HOLD_LENGTH = 300;            // 长按胶囊长度（像素），决定长按时长：条越长按越久
 const DOUBLE_CHANCE = 0.25;         // 出现「双压」的概率
+const NOTE_BUSY_MARGIN = 250;       // 判定点占用时间余量（毫秒），避免音符重叠无法判定
 let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 millis()）
 
 let judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 }; // 各判定计数
@@ -287,20 +288,64 @@ function drawJudgePoints() {
 // ---------------------------------------------------------------------------
 
 /**
+ * 音符的「占用时间区间」[start, end]（该判定点在此期间被这个音符占用）。
+ */
+function noteBusyRange(n) {
+  if (n.type === 'hold') {
+    return [n.hitTime - NOTE_BUSY_MARGIN, n.holdEndTime];
+  }
+  return [n.hitTime - NOTE_BUSY_MARGIN, n.hitTime + NOTE_BUSY_MARGIN];
+}
+
+/**
+ * 判断判定点 angleIndex 在 [start, end] 区间内是否已被其它音符占用。
+ */
+function isAngleBusy(angleIndex, start, end) {
+  for (const n of notes) {
+    if (n.targetAngle !== angleIndex) continue;
+    const r = noteBusyRange(n);
+    if (start <= r[1] && end >= r[0]) return true; // 区间重叠 → 冲突
+  }
+  return false;
+}
+
+/**
+ * 随机选一个「空闲」的判定点（不与已有音符冲突）；找不到返回 -1。
+ */
+function pickFreeAngle(start, end) {
+  for (let tries = 0; tries < 24; tries++) {
+    const a = floor(random(8));
+    if (!isAngleBusy(a, start, end)) return a;
+  }
+  return -1;
+}
+
+/**
  * 生成一个音符：
  * - tap / hold：从圆心出发，随机 8 个方向之一
  * - star：沿判定圈从一个判定点滑向相邻判定点（顺/逆时针随机）
+ * 规则：避免把音符生成到已被占用的判定点（比如长按里夹 tap），无法判定的谱面会被跳过。
  */
 function spawnNote() {
-  spawnedCount++;
   const spawnTime = millis();
 
-  // 双压：一定概率生成一对同时到达、落在两个不同判定点的 tap
+  // 双压：两个不同点、同时到达的 tap
   if (random() < DOUBLE_CHANCE) {
-    const a1 = floor(random(8));
-    let a2 = floor(random(8));
-    while (a2 === a1) a2 = floor(random(8)); // 确保两个点不同
     const hitTime = spawnTime + NOTE_TRAVEL_TIME;
+    const s = hitTime - NOTE_BUSY_MARGIN;
+    const e = hitTime + NOTE_BUSY_MARGIN;
+
+    const a1 = pickFreeAngle(s, e);
+    if (a1 === -1) return; // 找不到空闲点，放弃本次
+
+    let a2 = -1;
+    for (let tries = 0; tries < 24; tries++) {
+      const a = floor(random(8));
+      if (a !== a1 && !isAngleBusy(a, s, e)) { a2 = a; break; }
+    }
+    if (a2 === -1) return; // 只有一处空闲，放弃双压
+
+    spawnedCount++;
     notes.push({ type: 'tap', angle: a1, targetAngle: a1, spawnTime: spawnTime, progress: 0, hitTime: hitTime, judged: false, isDouble: true });
     notes.push({ type: 'tap', angle: a2, targetAngle: a2, spawnTime: spawnTime, progress: 0, hitTime: hitTime, judged: false, isDouble: true });
     return;
@@ -309,33 +354,36 @@ function spawnNote() {
   const type = random(['tap', 'tap', 'tap', 'hold', 'star']);
 
   if (type === 'star') {
-    const startAngle = floor(random(8));       // 起始判定点 0~7
-    const direction = random() < 0.5 ? 1 : -1; // 1 顺时针，-1 逆时针
-
-    notes.push({
-      type: 'star',
-      startAngle: startAngle,
-      direction: direction,
-      spawnTime: spawnTime,
-      progress: 0,
-      targetAngle: (startAngle + direction + 8) % 8,
-      hitTime: spawnTime + STAR_TRAVEL_TIME,
-      judged: false,
-    });
+    const startAngle = floor(random(8));
+    const direction = random() < 0.5 ? 1 : -1;
+    const targetAngle = (startAngle + direction + 8) % 8;
+    const hitTime = spawnTime + STAR_TRAVEL_TIME;
+    if (isAngleBusy(targetAngle, hitTime - NOTE_BUSY_MARGIN, hitTime + NOTE_BUSY_MARGIN)) return;
+    spawnedCount++;
+    notes.push({ type: 'star', startAngle: startAngle, direction: direction, spawnTime: spawnTime, progress: 0, targetAngle: targetAngle, hitTime: hitTime, judged: false });
   } else {
-    const angle = floor(random(8)); // 0~7，8 个方向之一
+    const hitTime = spawnTime + NOTE_TRAVEL_TIME;
 
+    let busyStart = hitTime - NOTE_BUSY_MARGIN;
+    let busyEnd = hitTime + NOTE_BUSY_MARGIN;
+    if (type === 'hold') {
+      busyEnd = hitTime + HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1);
+    }
+
+    const angle = pickFreeAngle(busyStart, busyEnd);
+    if (angle === -1) return;
+
+    spawnedCount++;
     const note = {
       type: type, // 'tap' | 'hold'
       angle: angle,
       targetAngle: angle,
       spawnTime: spawnTime,
       progress: 0,
-      hitTime: spawnTime + NOTE_TRAVEL_TIME,
+      hitTime: hitTime,
       judged: false,
     };
     if (type === 'hold') {
-      // 长按时长 = 条长度 × 音符速度（尾部通过判定点所需的时间）
       note.holdDuration = HOLD_LENGTH * NOTE_TRAVEL_TIME / max(judgeRadius, 1);
       note.holdEndTime = note.hitTime + note.holdDuration;
       note.holding = false;
