@@ -39,6 +39,7 @@ let nextSpawnTime = 0;              // 下一个音符的生成时刻（p5 milli
 let judgeCounts = { perfect: 0, great: 0, good: 0, miss: 0 }; // 各判定计数
 let particles = [];                 // 命中星星散落粒子 {x,y,vx,vy,angle,spin,size,color,start}
 let missEffects = [];               // miss 淡蓝圆环 {x, y, start}
+let emptyEffects = [];              // 空判黄色波纹 {x, y, start}
 let judgeOsc, judgeEnv;             // 判定音效（振荡器 + 包络）
 
 // 分数与连击
@@ -119,10 +120,11 @@ function updateHands() {
 }
 
 // 手腕触发判定点的半径与状态
-const TRIGGER_RADIUS = 150; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
+const TRIGGER_RADIUS = 175; // 手腕命中判定点的触发半径（像素），觉得难命中就调大
+const PINCH_RATIO = 0.4;     // 捏合判定阈值：拇指-食指距离 / 手大小，小于此值算「捏合」
 let fistState = {};                 // 每只手(side)当前是否处于「握拳」状态
 let holdTracker = {};               // 每只手(side)正在长按的音符对象
-const FIST_DEBOUNCE = 4;            // 连续多少帧认定手势切换（防识别抖动）
+const FIST_DEBOUNCE = 3;            // 连续多少帧认定手势切换（越小越灵敏，但太小说不定会抖动）
 let fistFrames = {};                // 每只手(side)的连续帧状态 { fist, count }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,7 @@ function draw() {
       drawJudgePoints();
       drawNotes();
       drawMissEffects();
+      drawEmptyEffects();
       drawParticles();
       return;
     }
@@ -162,6 +165,7 @@ function draw() {
     updateNotes();
     drawNotes();
     drawMissEffects();
+    drawEmptyEffects();
     drawParticles();
 
     // 手势：更新手势 → 画手腕悬停特效 → 检测握拳命中（画在最上层）
@@ -598,17 +602,24 @@ function drawDebug() {
     circle(pos.x, pos.y, TRIGGER_RADIUS * 2);
   }
 
-  // 2) 手部：手腕点 + 手势名 + 把握度
+  // 2) 手部：手腕点 + 捏合比
   for (const hand of hands) {
     const w = hand.points[0]; // 手腕
     noStroke();
     fill(0, 212, 255);
     circle(w.x, w.y, 10);
 
+    const thumbTip = hand.points[4];
+    const indexTip = hand.points[8];
+    const middleTip = hand.points[12];
+    const handScale = dist(w.x, w.y, middleTip.x, middleTip.y);
+    const pinch = dist(thumbTip.x, thumbTip.y, indexTip.x, indexTip.y);
+    const ratio = handScale > 1 ? (pinch / handScale).toFixed(2) : '?';
+
     fill(255);
     textSize(14);
     textAlign(CENTER, CENTER);
-    text(hand.gesture + ' ' + round(hand.score * 100) + '%', w.x, w.y - 24);
+    text((isPinching(hand) ? '捏合 ' : '张开 ') + ratio, w.x, w.y - 24);
   }
   pop();
 }
@@ -617,13 +628,30 @@ function drawDebug() {
  * 手腕命中检测：检测到「握拳(Closed_Fist)」手势时，找离手最近的判定点触发一次命中。
  * 只有「从张开变成握拳」的瞬间才触发一次，持续握拳不会重复触发。
  */
+/**
+ * 捏合判定：用「拇指尖(4) ↔ 食指尖(8)」的距离，除以「手腕(0) ↔ 中指指尖(12)」
+ * 的距离（手的大小基准）。比例小于 PINCH_RATIO 视为「手指合拢（捏合）」。
+ */
+function isPinching(hand) {
+  const wrist = hand.points[0];
+  const thumbTip = hand.points[4];
+  const indexTip = hand.points[8];
+  const middleTip = hand.points[12];
+
+  const handScale = dist(wrist.x, wrist.y, middleTip.x, middleTip.y);
+  if (handScale < 1) return false;
+
+  const pinch = dist(thumbTip.x, thumbTip.y, indexTip.x, indexTip.y);
+  return (pinch / handScale) < PINCH_RATIO;
+}
+
 function checkHandHits() {
   const activeSides = new Set();
 
   // 1) 每只手的手势变化：带防抖，避免识别抖动导致长按误断
   for (const hand of hands) {
     activeSides.add(hand.side);
-    const isFist = hand.gesture === 'Closed_Fist' && hand.score >= 0.6;
+    const isFist = isPinching(hand);
 
     // 连续帧计数，状态稳定 FIST_DEBOUNCE 帧后才认定切换
     let f = fistFrames[hand.side];
@@ -677,7 +705,12 @@ function graspStart(hand) {
   if (bestDist >= TRIGGER_RADIUS || idx === -1) return;
 
   const t = findJudgeTarget(idx);
-  if (!t) return;
+  if (!t) {
+    // 空判：此处没有可判定的音符，生成黄色波纹特效
+    const pos = judgePointPosition(idx);
+    spawnEmptyEffect(pos.x, pos.y);
+    return;
+  }
 
   if (t.note.type === 'hold') {
     startHold(t.note, t.grade, hand.side);
@@ -987,6 +1020,43 @@ function drawMissEffects() {
   pop();
 }
 
+/**
+ * 空判特效：在判定点记录一个黄色波纹（与 miss 同款，只是黄色）。
+ */
+function spawnEmptyEffect(x, y) {
+  emptyEffects.push({ x: x, y: y, start: millis() });
+}
+
+/**
+ * 绘制空判特效：300ms 内向外扩散并淡出的黄色空心圆。
+ */
+function drawEmptyEffects() {
+  const now = millis();
+  const LIFE = 300;
+
+  push();
+  noFill();
+  strokeWeight(3);
+
+  for (let i = emptyEffects.length - 1; i >= 0; i--) {
+    const e = emptyEffects[i];
+    const p = (now - e.start) / LIFE;
+
+    if (p >= 1) {
+      emptyEffects.splice(i, 1);
+      continue;
+    }
+
+    const r = map(p, 0, 1, 10, 50);
+    const c = color(HOLD_COLOR); // 黄 #ffd54a
+    c.setAlpha(255 * (1 - p));
+    stroke(c);
+    circle(e.x, e.y, r * 2);
+  }
+
+  pop();
+}
+
 // ---------------------------------------------------------------------------
 // 游戏初始化入口（由 main.js 在点击「开始游戏」时调用）
 // ---------------------------------------------------------------------------
@@ -1001,6 +1071,7 @@ function startGame() {
   notes = [];
   particles = [];
   missEffects = [];
+  emptyEffects = [];
   spawnedCount = 0;
   nextSpawnTime = millis();
 
